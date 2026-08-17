@@ -1,0 +1,62 @@
+[
+  {
+    "id": "faq-001",
+    "category": "refunds",
+    "question": "What is your refund policy?",
+    "answer": "We offer a 30-day money-back guarantee on all unopened supplements. If you're not satisfied with an opened product, contact support within 14 days of delivery and we'll issue a refund or store credit on a case-by-case basis."
+  },
+  {
+    "id": "faq-002",
+    "category": "refunds",
+    "question": "How long does it take to get my refund?",
+    "answer": "Once we receive and inspect your return, refunds are processed within 3-5 business days. It may take an additional 2-7 business days for the refund to appear on your original payment method, depending on your bank."
+  },
+  {
+    "id": "faq-003",
+    "category": "replacements",
+    "question": "My order arrived damaged, can I get a replacement?",
+    "answer": "Yes. If your order arrives damaged or defective, email support@example-supplements.com with a photo of the item within 7 days of delivery and we'll ship a free replacement right away, no return required."
+  },
+  {
+    "id": "faq-004",
+    "category": "replacements",
+    "question": "I received the wrong product in my order, what should I do?",
+    "answer": "We're sorry about that! Contact our support team with your order number and a photo of what you received, and we'll send the correct item at no extra cost and provide a prepaid label to return the incorrect one."
+  },
+  {
+    "id": "faq-005",
+    "category": "shipping",
+    "question": "How much does shipping cost?",
+    "answer": "Standard shipping is free on all orders over $50. Orders under $50 have a flat shipping fee of $4.99. Expedited 2-day shipping is available at checkout for an additional $9.99."
+  },
+  {
+    "id": "faq-006",
+    "category": "shipping",
+    "question": "How long does shipping take?",
+    "answer": "Standard shipping typically takes 3-5 business days within the continental US. Expedited shipping takes 1-2 business days. International shipping times vary by destination, usually 7-14 business days."
+  },
+  {
+    "id": "faq-007",
+    "category": "order_tracking",
+    "question": "How can I track my order?",
+    "answer": "Once your order ships, you'll receive a confirmation email with a tracking number and a link to track it in real time. You can also view tracking information anytime by logging into your account and visiting Order History."
+  },
+  {
+    "id": "faq-008",
+    "category": "order_tracking",
+    "question": "My tracking number isn't updating, what should I do?",
+    "answer": "Tracking information can take up to 24 hours to update after a label is created. If there's been no movement for more than 3 business days, please contact support and we'll investigate with the carrier on your behalf."
+  },
+  {
+    "id": "faq-009",
+    "category": "orders",
+    "question": "Can I cancel or change my order after placing it?",
+    "answer": "Orders can be changed or canceled within 1 hour of placing them by contacting support immediately. After that window, orders enter fulfillment and can no longer be modified, though you can still request a return once delivered."
+  },
+  {
+    "id": "faq-010",
+    "category": "products",
+    "question": "Are your supplements third-party tested for quality and safety?",
+    "answer": "Yes, every batch of our supplements is third-party tested for purity, potency, and contaminants. Certificates of Analysis (COAs) for each product are available on request by emailing support@example-supplements.com."
+  }
+]
