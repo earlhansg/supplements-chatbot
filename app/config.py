@@ -10,12 +10,12 @@ class Settings(BaseSettings):
 
     openai_api_key: str
     chat_model: str = "gpt-4o-mini"
-    embedding_model: str = "text-embedding-3-small"
-    embedding_dim: int = 1536
+    embedding_model: str = "BAAI/bge-base-en-v1.5"
+    embedding_dim: int = 768
 
     redis_url: str = "redis://127.0.0.1:6379"
 
-    cache_similarity_threshold: float = 0.85
+    cache_similarity_threshold: float = 0.78
     cache_ttl_seconds: int = 86400
 
     kb_retrieval_k: int = 3
