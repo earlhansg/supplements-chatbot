@@ -1,6 +1,7 @@
 # Supplements Store Chatbot (backend-only)
 
-A FastAPI + LangGraph + OpenAI backend for an e-commerce support chatbot,
+A FastAPI + LangGraph + OpenAI backend (with local, open-source embeddings)
+for an e-commerce support chatbot,
 built as a Python translation of the patterns used in the local
 `reference/redish/openai-version` project (RedisJSON documents + a
 RediSearch vector index for KNN lookups, and a LangGraph workflow that
@@ -16,7 +17,8 @@ runs with just `docker compose up`.
 
 - **FastAPI** — HTTP API, served docs at `/docs`
 - **LangGraph** — orchestrates: check cache → (miss) retrieve context → generate answer → save to cache
-- **OpenAI** — `gpt-4o-mini` for chat, `text-embedding-3-small` for embeddings
+- **OpenAI** — `gpt-4o-mini` for chat
+- **sentence-transformers** — `BAAI/bge-base-en-v1.5` (local, open-source, no API cost) for embeddings
 - **Redis Stack** (RedisJSON + RediSearch) — knowledge base storage, vector search, and semantic cache
 - **Pydantic** — request/response schemas (`app/schemas.py`) and settings (`app/config.py`)
 
@@ -33,7 +35,7 @@ Two RedisJSON collections, each with its own RediSearch vector index.
   "category": "shipping",
   "question": "How much does shipping cost?",
   "answer": "Standard shipping is free on all orders over $50. ...",
-  "embedding": [0.0123, -0.0456, ...]   // 1536 floats, text-embedding-3-small
+  "embedding": [0.0123, -0.0456, ...]   // 768 floats, BAAI/bge-base-en-v1.5
 }
 ```
 
@@ -44,7 +46,7 @@ Index `idx:kb` (`FT.CREATE idx:kb ON JSON PREFIX 1 kb: SCHEMA ...`):
 | `$.question`     | `question`  | TEXT              |
 | `$.answer`       | `answer`    | TEXT              |
 | `$.category`     | `category`  | TAG               |
-| `$.embedding`    | `embedding` | VECTOR (HNSW, COSINE, DIM 1536, FLOAT32) |
+| `$.embedding`    | `embedding` | VECTOR (HNSW, COSINE, DIM 768, FLOAT32) |
 
 On every question, the workflow embeds the question and runs a `KNN 3`
 query against `idx:kb` to pull the 3 most relevant FAQs as context for the LLM.
@@ -66,7 +68,7 @@ Index `idx:cache` (same shape as `idx:kb`, over the `cache:` prefix):
 |----------------|----------|--------------------------------------------|
 | `$.query`      | `query`  | TEXT                                       |
 | `$.answer`     | `answer` | TEXT                                       |
-| `$.embedding`  | `embedding` | VECTOR (HNSW, COSINE, DIM 1536, FLOAT32) |
+| `$.embedding`  | `embedding` | VECTOR (HNSW, COSINE, DIM 768, FLOAT32) |
 
 Every `cache:*` key gets a Redis `EXPIRE` set to `CACHE_TTL_SECONDS`
 (default 24h), so entries age out on their own — no separate cleanup job.
@@ -76,7 +78,10 @@ expired entry simply stops showing up in KNN results.
 **Cache lookup logic:** embed the incoming question, run `KNN 1` against
 `idx:cache`, convert the returned cosine distance to a similarity
 (`1 - score`), and treat it as a hit only if `similarity >=
-CACHE_SIMILARITY_THRESHOLD` (default `0.85`). This is what makes it a
+CACHE_SIMILARITY_THRESHOLD` (default `0.78`, calibrated for
+`BAAI/bge-base-en-v1.5` — its cosine similarities run lower than OpenAI's for
+same-topic paraphrases, so this threshold is model-dependent; re-tune it if
+you swap embedding models). This is what makes it a
 *semantic* cache — "how long till my refund shows up" can hit a cache
 entry saved for "How long does it take to get my refund?" even though the
 wording differs.
@@ -111,15 +116,18 @@ The API response always includes `is_cached: true/false` (see
 docker compose up -d
 ```
 
-This runs `redis/redis-stack-server`, which bundles the RedisJSON and
+This runs `redis/redis-stack`, which bundles the RedisJSON and
 RediSearch modules that `FT.CREATE` / `FT.SEARCH` and `JSON.SET` need
-(plain `redis:latest` does **not** include these modules).
+(plain `redis:latest` does **not** include these modules), plus the
+**RedisInsight** web UI on port `8001` — open
+**http://localhost:8001/redis-stack/browser** to browse keys, run
+commands, and inspect the `kb:*` / `cache:*` documents visually.
 
 ### 2. Configure environment
 
 ```bash
 cp .env.example .env
-# then edit .env and set OPENAI_API_KEY
+# then edit .env and set OPENAI_API_KEY (still used for chat completions)
 ```
 
 ### 3. Install dependencies
@@ -129,6 +137,12 @@ python -m venv .venv
 .venv\Scripts\activate        # Windows
 pip install -r requirements.txt
 ```
+
+`sentence-transformers` pulls in PyTorch, so this install is heavier than
+before. The `BAAI/bge-base-en-v1.5` embedding model (~440MB) is downloaded
+from Hugging Face on first run and cached locally
+(`~/.cache/huggingface`/`%USERPROFILE%\.cache\huggingface` on Windows) — no
+API key or network access is needed for embeddings after that.
 
 ### 4. Run the API
 
@@ -212,7 +226,14 @@ of erroring.
 
 ### Option C — inspect Redis directly
 
-With `redis-cli` (or `docker compose exec redis redis-cli`), you can watch
+**Via RedisInsight (web UI):** open
+**http://localhost:8001/redis-stack/browser**, connect to the local
+Redis instance (host `redis`/`localhost`, port `6379`, no auth), and
+browse the `kb:*` / `cache:*` keys, run `FT.SEARCH` / `JSON.GET` from
+the built-in CLI, and watch TTLs count down on cache entries — all
+without leaving the browser.
+
+**Via `redis-cli`** (or `docker compose exec redis redis-cli`), you can watch
 the two indexes and collections the app is reading/writing:
 
 ```bash
@@ -239,6 +260,11 @@ docker compose down -v && docker compose up -d
 python scripts/load_kb.py
 ```
 
+**Note:** if you're migrating an existing Redis instance from the OpenAI
+embeddings (1536-dim) to the local model (768-dim), you must wipe the
+volume as above — `FT.CREATE` won't alter an existing index's vector
+dimension, so old and new embeddings can't coexist in the same index.
+
 ## Project layout
 
 ```
@@ -248,7 +274,7 @@ supplements-chatbot/
 │   ├── schemas.py          # ChatRequest/ChatResponse pydantic models
 │   ├── redis_client.py     # shared redis-py connection
 │   ├── vector_utils.py     # float list <-> FLOAT32 bytes
-│   ├── embeddings.py       # OpenAI embeddings wrapper
+│   ├── embeddings.py       # local sentence-transformers embeddings wrapper
 │   ├── knowledge_base.py   # kb:* documents + idx:kb (RediSearch)
 │   ├── semantic_cache.py   # cache:* documents + idx:cache (RediSearch)
 │   ├── llm.py               # OpenAI chat completion wrapper
@@ -256,6 +282,6 @@ supplements-chatbot/
 │   └── main.py               # FastAPI app + /chat endpoint
 ├── data/faqs.json           # 10 sample FAQs (knowledge base seed data)
 ├── scripts/load_kb.py        # standalone KB loader
-├── docker-compose.yml         # redis-stack-server
+├── docker-compose.yml         # redis-stack (+ RedisInsight UI on :8001)
 └── .env.example
 ```

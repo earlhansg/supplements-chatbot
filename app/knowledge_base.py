@@ -87,7 +87,7 @@ def load_faqs(faqs_path: str) -> int:
 def retrieve_context(query: str, k: int | None = None) -> list[dict]:
     """KNN vector search over the FAQ knowledge base, returns the top-k FAQ entries."""
     k = k or settings.kb_retrieval_k
-    query_vector = generate_embedding(query)
+    query_vector = generate_embedding(query, is_query=True)
 
     search_query = (
         Query(f"*=>[KNN {k} @embedding $vec AS score]")
