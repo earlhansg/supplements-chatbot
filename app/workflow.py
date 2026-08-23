@@ -13,7 +13,8 @@ from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from app.knowledge_base import retrieve_context
-from app.llm import generate_answer
+# from app.llm import generate_answer  # swap for app.llm_local to use the local server
+from app.llm_local import generate_answer
 from app.semantic_cache import check_cache, save_cache
 
 

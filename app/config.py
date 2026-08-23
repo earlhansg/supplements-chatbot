@@ -8,8 +8,18 @@ class Settings(BaseSettings):
 
     app_name: str = "Supplements Store Chatbot"
 
-    openai_api_key: str
+    # Hosted OpenAI (used by app/llm.py). Optional: leave empty when running
+    # against the local OpenAI-compatible server via app/llm_local.py.
+    openai_api_key: str = ""
     chat_model: str = "gpt-4o-mini"
+
+    # Local OpenAI-compatible server (used by app/llm_local.py). The server
+    # ignores credentials, so the key is a placeholder.
+    local_llm_base_url: str = "http://127.0.0.1:8080/v1"
+    local_llm_api_key: str = "unused"
+    local_llm_timeout_seconds: float = 120.0
+    local_chat_model: str = "sonnet"
+
     embedding_model: str = "BAAI/bge-base-en-v1.5"
     embedding_dim: int = 768
 

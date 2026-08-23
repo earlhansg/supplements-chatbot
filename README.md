@@ -1,8 +1,9 @@
 # Supplements Store Chatbot (backend-only)
 
-A FastAPI + LangGraph + OpenAI backend (with local, open-source embeddings)
-for an e-commerce support chatbot,
-built as a Python translation of the patterns used in the local
+A FastAPI + LangGraph backend for an e-commerce support chatbot, with local,
+open-source embeddings and a chat step that runs against either hosted OpenAI
+or a local OpenAI-compatible server.
+Built as a Python translation of the patterns used in the local
 `reference/redish/openai-version` project (RedisJSON documents + a
 RediSearch vector index for KNN lookups, and a LangGraph workflow that
 checks a cache before ever calling the LLM).
@@ -17,7 +18,9 @@ runs with just `docker compose up`.
 
 - **FastAPI** — HTTP API, served docs at `/docs`
 - **LangGraph** — orchestrates: check cache → (miss) retrieve context → generate answer → save to cache
-- **OpenAI** — `gpt-4o-mini` for chat
+- **OpenAI-compatible chat** — either hosted OpenAI (`gpt-4o-mini`, `app/llm.py`)
+  or a local OpenAI-compatible server (`app/llm_local.py`); see
+  [Chat backends](#chat-backends-hosted-openai-vs-local)
 - **sentence-transformers** — `BAAI/bge-base-en-v1.5` (local, open-source, no API cost) for embeddings
 - **Redis Stack** (RedisJSON + RediSearch) — knowledge base storage, vector search, and semantic cache
 - **Pydantic** — request/response schemas (`app/schemas.py`) and settings (`app/config.py`)
@@ -108,7 +111,93 @@ START -> check_cache --(hit)--> END
 The API response always includes `is_cached: true/false` (see
 `app/schemas.py::ChatResponse`).
 
+## Chat backends: hosted OpenAI vs. local
+
+Only the `generate_answer` step calls an LLM (embeddings are already local).
+There are two interchangeable modules for it, with an identical public
+surface — `SYSTEM_PROMPT` and `generate_answer(question, context)`:
+
+| Module             | Talks to                                     | Model setting                    |
+|--------------------|----------------------------------------------|----------------------------------|
+| `app/llm.py`       | hosted OpenAI (`api.openai.com`)             | `CHAT_MODEL` (`gpt-4o-mini`)     |
+| `app/llm_local.py` | `LOCAL_LLM_BASE_URL` (`127.0.0.1:8080/v1`)   | `LOCAL_CHAT_MODEL` (`sonnet`)    |
+
+Switch between them by editing the one import in `app/workflow.py`:
+
+```python
+# from app.llm import generate_answer        # hosted OpenAI
+from app.llm_local import generate_answer    # local server  <- currently active
+```
+
+Nothing else in the app changes — the workflow, cache, and KB behave
+identically either way. Both modules are kept in the repo so you can flip
+back and forth without deleting anything.
+
+### Running the local OpenAI-compatible server
+
+The local provider is a standalone `local-openai.exe` that exposes an
+OpenAI-compatible API in front of the Claude CLI. In its **own PowerShell
+window** (keep it open — this is the server):
+
+```powershell
+cd <folder containing local-openai.exe>
+$env:CLAUDE_CODE_OAUTH_TOKEN = "your-token-here"
+.\local-openai.exe
+```
+
+It logs its startup line and then every request:
+
+```
+time=... level=INFO msg=listening addr=127.0.0.1:8080 provider=claude-cli model=sonnet auth=false
+```
+
+The `CLAUDE_CODE_OAUTH_TOKEN` env var is what authenticates the underlying
+Claude CLI. Without it (or with an expired token) the server starts fine and
+accepts requests, but completions come back as `502` with
+`claude CLI reported an error: Not logged in`.
+
+#### Endpoints it exposes
+
+| Method | Path                    | Notes                                  |
+|--------|-------------------------|----------------------------------------|
+| `POST` | `/v1/chat/completions`  | JSON, or SSE when `"stream": true`     |
+| `GET`  | `/v1/models`            | the model IDs the provider accepts     |
+| `GET`  | `/v1/models/{model}`    | 404 for unknown IDs                    |
+| `GET`  | `/healthz`              | never authenticated                    |
+| `GET`  | `/`                     | service description                    |
+
+Sanity-check it before pointing the app at it:
+
+```bash
+curl http://127.0.0.1:8080/healthz    # -> {"provider":"claude-cli","status":"ok"}
+curl http://127.0.0.1:8080/v1/models  # -> sonnet, opus, haiku, gpt-4o, gpt-4o-mini, ...
+```
+
+`LOCAL_CHAT_MODEL` must be one of the IDs from `/v1/models` — unknown IDs
+return 404. The server ignores credentials, so `LOCAL_LLM_API_KEY` stays a
+placeholder (`unused`); the `openai` Python client just requires *some*
+non-empty value.
+
+The equivalent of what `app/llm_local.py` does, in miniature:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="unused")
+client.chat.completions.create(model="sonnet", messages=[{"role": "user", "content": "Hi"}])
+```
+
+Requests are proxied to a slower backend than the hosted API, so the client
+is built with a generous `LOCAL_LLM_TIMEOUT_SECONDS` (default 120s) instead
+of the SDK's default timeout.
+
 ## Getting started
+
+### 0. Start the local LLM server (only if using `app/llm_local.py`)
+
+See [Running the local OpenAI-compatible server](#running-the-local-openai-compatible-server)
+above — set `CLAUDE_CODE_OAUTH_TOKEN`, run `.\local-openai.exe`, leave that
+window open. Skip this entirely if you're using hosted OpenAI.
 
 ### 1. Start Redis Stack
 
@@ -127,8 +216,20 @@ commands, and inspect the `kb:*` / `cache:*` documents visually.
 
 ```bash
 cp .env.example .env
-# then edit .env and set OPENAI_API_KEY (still used for chat completions)
 ```
+
+Then edit `.env` for whichever chat backend you're using:
+
+- **Hosted OpenAI** (`app/llm.py`) — set `OPENAI_API_KEY`. `CHAT_MODEL`
+  defaults to `gpt-4o-mini`.
+- **Local server** (`app/llm_local.py`) — no key needed. `OPENAI_API_KEY` can
+  be left empty, and the defaults
+  (`LOCAL_LLM_BASE_URL=http://127.0.0.1:8080/v1`, `LOCAL_LLM_API_KEY=unused`,
+  `LOCAL_CHAT_MODEL=sonnet`, `LOCAL_LLM_TIMEOUT_SECONDS=120`) work as-is
+  against `local-openai.exe`.
+
+Embeddings never need a key either way — they run locally via
+`sentence-transformers`.
 
 ### 3. Install dependencies
 
@@ -168,6 +269,12 @@ uvicorn app.main:app --reload
 Keep this running in its own terminal — it prints `CACHE HIT` /
 `CACHE MISS / NOT CACHED` for every request, which is the easiest way to
 watch the workflow's routing decision live while you test.
+
+With the local backend you end up with three windows open: `local-openai.exe`
+(port 8080), Redis Stack via Docker (port 6379), and uvicorn (port 8000). The
+`local-openai.exe` window logs each `POST /v1/chat/completions`, so you can
+see exactly which questions actually reached the LLM versus which were served
+from the semantic cache.
 
 ## Testing it
 
@@ -277,7 +384,8 @@ supplements-chatbot/
 │   ├── embeddings.py       # local sentence-transformers embeddings wrapper
 │   ├── knowledge_base.py   # kb:* documents + idx:kb (RediSearch)
 │   ├── semantic_cache.py   # cache:* documents + idx:cache (RediSearch)
-│   ├── llm.py               # OpenAI chat completion wrapper
+│   ├── llm.py               # chat wrapper -> hosted OpenAI
+│   ├── llm_local.py         # chat wrapper -> local OpenAI-compatible server
 │   ├── workflow.py          # LangGraph StateGraph
 │   └── main.py               # FastAPI app + /chat endpoint
 ├── data/faqs.json           # 10 sample FAQs (knowledge base seed data)
