@@ -1,20 +1,140 @@
-# Supplements Store Chatbot (backend-only)
+# Supplements Store Chatbot
 
-A FastAPI + LangGraph backend for an e-commerce support chatbot, with local,
-open-source embeddings and a chat step that runs against either hosted OpenAI
-or a local OpenAI-compatible server.
-Built as a Python translation of the patterns used in the local
-`reference/redish/openai-version` project (RedisJSON documents + a
-RediSearch vector index for KNN lookups, and a LangGraph workflow that
-checks a cache before ever calling the LLM).
+An e-commerce support chatbot built around a **semantic cache**: questions that
+*mean* the same thing as one already answered are served straight from Redis,
+without ever reaching the LLM.
 
-The reference project's semantic cache uses Redis's managed **LangCache**
-API. This project doesn't depend on that managed service — it implements
-the same "embed the question, KNN search, threshold on similarity" idea
-directly against a self-hosted Redis Stack instance, so the whole thing
-runs with just `docker compose up`.
+FastAPI + LangGraph backend, local open-source embeddings, Redis Stack for vector
+search, and a Next.js frontend whose whole job is to make the caching behaviour
+visible while you use it.
+
+![The three-panel UI: cached knowledge, chat, and a live request log](docs/screenshots/desktop.png)
+
+*A real session. The first question misses the cache and takes **3.75 s** (KB
+retrieval + LLM). The reworded follow-up — "order" became "package" — matches the
+cached entry at **88.3%** similarity and returns in **35 ms**.*
+
+## What this project demonstrates
+
+- **Vector search as a caching layer**, not just retrieval — embed the question,
+  KNN against previously-answered questions, serve on a similarity threshold.
+- **A graph-structured LLM workflow** (LangGraph) where the cache check is a
+  routing decision that can skip the expensive branch entirely.
+- **RAG done properly** on the miss path: KNN over a FAQ knowledge base supplies
+  grounded context before generation.
+- **Two interchangeable LLM backends** behind one interface — hosted OpenAI or a
+  local OpenAI-compatible server — swapped with a single import.
+- **A frontend that explains the system it's talking to**, surfacing hit/miss,
+  similarity scores, response times, and the live contents of the cache index.
+- **No API cost for embeddings.** `BAAI/bge-base-en-v1.5` runs locally via
+  `sentence-transformers`; only the generation step calls out.
+
+## Architecture
+
+```
+  Browser — three-panel UI  (:3000)
+      │
+      │  same-origin fetch only
+      ▼
+  Next.js Route Handlers ─────────────────► Redis   FT.SEARCH idx:cache
+      │                                             (feeds the cache panel)
+      │  POST /chat  (:8000)
+      ▼
+  FastAPI ──► LangGraph workflow
+                  │
+                  ├─ check_cache ────────► Redis   KNN 1 over idx:cache
+                  │       │
+                  │       ├─ hit  ──► return the stored answer      ~35 ms
+                  │       │
+                  │       └─ miss ──► retrieve_context ──► Redis   KNN 3 over idx:kb
+                  │                   generate_answer   ──► LLM
+                  │                   save_cache        ──► Redis   new cache:<uuid>
+                  ▼                                                 ~3.75 s
+          { answer, is_cached, cache_similarity, sources }
+```
+
+The browser never talks to FastAPI or Redis directly. The backend registers no
+CORS middleware, so every call is proxied server-side through Next.js — which
+also keeps the Redis connection string out of the client bundle.
+
+## The core process
+
+Every question takes one of two paths, and the UI labels which one it took.
+
+### Cache hit — the fast path
+
+```
+question ──► embed (local) ──► KNN 1 over idx:cache
+                                          │
+                                    similarity ≥ 0.78?
+                                          │ yes
+                                    return stored answer      ~35 ms total
+```
+
+No knowledge-base lookup, no LLM call, no new cache write. `sources` comes back
+empty precisely because retrieval was skipped.
+
+### Cache miss — the full path
+
+```
+question ──► embed ──► KNN 1 over idx:cache ──► below threshold
+                                                     │
+                              KNN 3 over idx:kb ─────┘        (grounding)
+                                     │
+                              LLM generate_answer              (the slow part)
+                                     │
+                              save cache:<uuid> + EXPIRE 24h   ~3.75 s total
+```
+
+The answer is written back as a new `cache:<uuid>` document, so the *next*
+semantically similar question takes the fast path.
+
+<details>
+<summary><b>Screenshot: the retrieved FAQs behind a cache miss</b></summary>
+
+Expanding "3 FAQs retrieved" shows the actual KNN results from `idx:kb` with
+their similarity scores — the grounding context the LLM was given.
+
+![Expanded FAQ sources showing KNN results and similarity scores](docs/screenshots/sources-expanded.png)
+
+</details>
+
+## Why this is worth caching
+
+Measured on this machine, local LLM backend, from the request log above:
+
+| | Response time | LLM call | KB lookup |
+|---|---|---|---|
+| Cache miss | **3.75 s** | yes | yes (KNN 3) |
+| Cache hit | **35 ms** | no | no |
+
+Roughly **100× faster**, and every hit is a generation request that never
+happened. On a real support bot — where a long tail of customers ask the same
+dozen questions in different words — that is the difference between paying per
+answer and paying per *distinct* answer.
+
+### The threshold is a real tradeoff
+
+`CACHE_SIMILARITY_THRESHOLD = 0.78` is a tuned guess, and it is wrong in both
+directions. Measured against `BAAI/bge-base-en-v1.5`:
+
+| Pair | Similarity | Outcome |
+|---|---|---|
+| "How can I track my order?" → "How do I track my package?" | 0.883 | hit ✅ |
+| "Can I cancel my order after placing it?" → "How do I cancel an order I just placed?" | 0.947 | hit ✅ |
+| "What is your refund policy?" → "Can I get my money back on an unopened tub?" | 0.673 | **miss** — a fair paraphrase that re-runs the LLM |
+| "How long does shipping take?" → "How much does shipping cost?" | 0.809 | **hit** — but these are different questions |
+
+That last row is the dangerous one: with "How long does shipping take?" already
+cached, asking about shipping *cost* scores 0.809 and gets served the *delivery
+time* answer. Raising the threshold fixes it and costs
+recall; lowering it does the reverse. The honest summary is that a single global
+cosine threshold cannot separate "reworded" from "related", and a production
+system would want a re-ranking or verification step on top.
 
 ## Tech stack
+
+**Backend**
 
 - **FastAPI** — HTTP API, served docs at `/docs`
 - **LangGraph** — orchestrates: check cache → (miss) retrieve context → generate answer → save to cache
@@ -24,6 +144,52 @@ runs with just `docker compose up`.
 - **sentence-transformers** — `BAAI/bge-base-en-v1.5` (local, open-source, no API cost) for embeddings
 - **Redis Stack** (RedisJSON + RediSearch) — knowledge base storage, vector search, and semantic cache
 - **Pydantic** — request/response schemas (`app/schemas.py`) and settings (`app/config.py`)
+
+**Frontend** (`frontend/`)
+
+- **Next.js 16** (App Router) + **React 19** + **TypeScript**
+- **Tailwind CSS v4**
+- **node-redis 6** — read-only `FT.SEARCH` against `idx:cache` from a Route Handler
+
+## Frontend
+
+A three-panel dashboard. Each panel answers a different question about what the
+system just did.
+
+| Panel | Shows | Source |
+|---|---|---|
+| **Left** — Semantic Cache | Every `cache:*` entry: question, stored answer, key, age | `FT.SEARCH idx:cache`, polled every 4s |
+| **Middle** — Support Chat | The conversation, with a hit/miss badge, timing and similarity under each answer | `POST /chat` via a proxy route |
+| **Right** — Request Log | One row per request: hit/miss, response time, similarity, timestamp | Client-side session state |
+
+Design notes worth calling out:
+
+- **The cache panel polls**, so answers cached by *another* session — or by a
+  previous run, since entries live 24h — appear without a refresh. During a demo
+  you can watch a new entry appear the instant a miss is answered.
+- **Response time is measured in the browser**, around the `fetch`, because the
+  backend returns no timing field. The request log's "107× faster" line is
+  computed from those measurements.
+- **Cache entries carry no timestamp** — the stored document is
+  `{query, answer, embedding}` and nothing else — so "1m ago" is derived from the
+  key's remaining TTL against `CACHE_TTL_SECONDS`.
+- **The request log is deliberately ephemeral.** No polling, no log endpoint, no
+  persistence; it is session state and clears on refresh.
+- **Degraded states are explicit.** Redis unreachable, `idx:cache` not created
+  yet, backend down, and LLM unreachable each produce a specific message rather
+  than a generic error.
+
+### Responsive
+
+Three columns on desktop; below `lg` the chat goes full-width and the side panels
+become drawers, each with a badge showing its item count.
+
+| Chat | Cache drawer |
+|---|---|
+| ![Mobile chat view](docs/screenshots/mobile-chat.png) | ![Mobile cache drawer](docs/screenshots/mobile-cache.png) |
+
+Full frontend documentation, including the API contract it is built against, is
+in [`frontend/README.md`](frontend/README.md).
 
 ## Redis data model
 
@@ -110,6 +276,25 @@ START -> check_cache --(hit)--> END
 
 The API response always includes `is_cached: true/false` (see
 `app/schemas.py::ChatResponse`).
+
+## API
+
+`POST /chat`
+
+```jsonc
+// request
+{ "question": "How do I track my package?" }
+
+// response
+{
+  "answer": "Once your order ships, you'll get a confirmation email...",
+  "is_cached": true,          // hit/miss flag the UI badges directly
+  "cache_similarity": 0.883,  // non-null only on a hit
+  "sources": []               // populated only on a miss — a hit skips KB retrieval
+}
+```
+
+`GET /health` → `{"status": "ok"}`. No authentication; this is a local demo.
 
 ## Chat backends: hosted OpenAI vs. local
 
@@ -260,6 +445,18 @@ file), run:
 python scripts/load_kb.py
 ```
 
+### 5. Run the frontend
+
+```bash
+cd frontend
+cp .env.example .env.local     # defaults already match the backend
+npm install
+npm run dev                    # http://localhost:3000
+```
+
+Cache **hits** work even if the LLM server isn't running; only **misses** need
+it. See [`frontend/README.md`](frontend/README.md) for configuration.
+
 ## Running it
 
 ```bash
@@ -270,15 +467,22 @@ Keep this running in its own terminal — it prints `CACHE HIT` /
 `CACHE MISS / NOT CACHED` for every request, which is the easiest way to
 watch the workflow's routing decision live while you test.
 
-With the local backend you end up with three windows open: `local-openai.exe`
-(port 8080), Redis Stack via Docker (port 6379), and uvicorn (port 8000). The
-`local-openai.exe` window logs each `POST /v1/chat/completions`, so you can
-see exactly which questions actually reached the LLM versus which were served
-from the semantic cache.
+With the local backend you end up with four windows open: `local-openai.exe`
+(port 8080), Redis Stack via Docker (port 6379), uvicorn (port 8000), and the
+Next.js dev server (port 3000). The `local-openai.exe` window logs each
+`POST /v1/chat/completions`, so you can see exactly which questions actually
+reached the LLM versus which were served from the semantic cache.
 
 ## Testing it
 
-### Option A — Swagger UI (`/docs`)
+### Option A — the UI (`http://localhost:3000`)
+
+The fastest way to see the behaviour. Ask one of the starter questions, then ask
+the paraphrase below it: the first is a miss, the second a hit, and the request
+log shows both timings side by side. The starter pairs are pre-verified to clear
+the 0.78 threshold.
+
+### Option B — Swagger UI (`/docs`)
 
 1. Open **http://127.0.0.1:8000/docs**.
 2. Expand `POST /chat` → **Try it out**.
@@ -299,7 +503,7 @@ from the semantic cache.
    hit even though no word overlaps with the original question.
 7. Try `GET /health` — should return `{"status": "ok"}`.
 
-### Option B — curl
+### Option C — curl
 
 ```bash
 # health check
@@ -331,7 +535,7 @@ Also try something the FAQs don't cover (e.g. `"Do you ship to the moon?"`)
 to confirm the bot still answers sensibly using general knowledge instead
 of erroring.
 
-### Option C — inspect Redis directly
+### Option D — inspect Redis directly
 
 **Via RedisInsight (web UI):** open
 **http://localhost:8001/redis-stack/browser**, connect to the local
@@ -367,6 +571,14 @@ docker compose down -v && docker compose up -d
 python scripts/load_kb.py
 ```
 
+To clear only the cache (keeping the knowledge base), so the next questions are
+guaranteed misses:
+
+```bash
+docker compose exec redis redis-cli --scan --pattern 'cache:*' | \
+  xargs -r docker compose exec -T redis redis-cli DEL
+```
+
 **Note:** if you're migrating an existing Redis instance from the OpenAI
 embeddings (1536-dim) to the local model (768-dim), you must wipe the
 volume as above — `FT.CREATE` won't alter an existing index's vector
@@ -377,19 +589,40 @@ dimension, so old and new embeddings can't coexist in the same index.
 ```
 supplements-chatbot/
 ├── app/
-│   ├── config.py          # pydantic-settings (.env)
-│   ├── schemas.py          # ChatRequest/ChatResponse pydantic models
-│   ├── redis_client.py     # shared redis-py connection
-│   ├── vector_utils.py     # float list <-> FLOAT32 bytes
-│   ├── embeddings.py       # local sentence-transformers embeddings wrapper
-│   ├── knowledge_base.py   # kb:* documents + idx:kb (RediSearch)
-│   ├── semantic_cache.py   # cache:* documents + idx:cache (RediSearch)
+│   ├── config.py            # pydantic-settings (.env)
+│   ├── schemas.py           # ChatRequest/ChatResponse pydantic models
+│   ├── redis_client.py      # shared redis-py connection
+│   ├── vector_utils.py      # float list <-> FLOAT32 bytes
+│   ├── embeddings.py        # local sentence-transformers embeddings wrapper
+│   ├── knowledge_base.py    # kb:* documents + idx:kb (RediSearch)
+│   ├── semantic_cache.py    # cache:* documents + idx:cache (RediSearch)
 │   ├── llm.py               # chat wrapper -> hosted OpenAI
 │   ├── llm_local.py         # chat wrapper -> local OpenAI-compatible server
 │   ├── workflow.py          # LangGraph StateGraph
-│   └── main.py               # FastAPI app + /chat endpoint
+│   └── main.py              # FastAPI app + /chat endpoint
+├── frontend/                # Next.js 16 dashboard
+│   ├── src/app/
+│   │   ├── page.tsx         # Server Component: first read of idx:cache
+│   │   └── api/             # chat proxy, cache reader, status probe
+│   ├── src/components/      # Dashboard + the three panels
+│   ├── src/lib/             # redis client, backend client, polling hook
+│   └── README.md            # frontend docs + the API contract it targets
 ├── data/faqs.json           # 10 sample FAQs (knowledge base seed data)
-├── scripts/load_kb.py        # standalone KB loader
-├── docker-compose.yml         # redis-stack (+ RedisInsight UI on :8001)
+├── scripts/load_kb.py       # standalone KB loader
+├── docs/screenshots/        # images used in this README
+├── docker-compose.yml       # redis-stack (+ RedisInsight UI on :8001)
 └── .env.example
 ```
+
+## Background
+
+Built as a Python translation of the patterns used in the local
+`reference/redish/openai-version` project (RedisJSON documents + a RediSearch
+vector index for KNN lookups, and a LangGraph workflow that checks a cache
+before ever calling the LLM).
+
+The reference project's semantic cache uses Redis's managed **LangCache** API.
+This project doesn't depend on that managed service — it implements the same
+"embed the question, KNN search, threshold on similarity" idea directly against
+a self-hosted Redis Stack instance, so the whole thing runs with just
+`docker compose up`.
