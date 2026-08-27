@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+/**
+ * The UI commits to a single dark theme rather than following the OS. It reads
+ * as an ops console, and — more importantly — the hit/miss greens and ambers
+ * were picked for contrast against a dark ground.
+ */
+
+@theme {
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SFMono-Regular", monospace;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background-color: #09090b; /* zinc-950 */
+  color: #f4f4f5; /* zinc-100 */
+  font-family: var(--font-sans);
+  overscroll-behavior: none;
+}
+
+/* Unobtrusive scrollbars inside the panels; the default light ones are jarring here. */
+.panel-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #3f3f46 transparent; /* zinc-700 */
+}
+
+.panel-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.panel-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.panel-scroll::-webkit-scrollbar-thumb {
+  background-color: #3f3f46;
+  border: 2px solid transparent;
+  border-radius: 9999px;
+  background-clip: content-box;
+}
+
+.panel-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: #52525b; /* zinc-600 */
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
