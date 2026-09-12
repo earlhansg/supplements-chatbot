@@ -29,6 +29,13 @@ export const serverConfig = {
   cacheListLimit: num(process.env.CACHE_LIST_LIMIT, 100),
 
   /**
+   * Must match `MAX_QUESTION_CHARS` in the backend's `.env`. Mirrored here so
+   * an over-length question fails at this boundary as a 400 rather than coming
+   * back from FastAPI's Pydantic validation as a 422.
+   */
+  maxQuestionChars: num(process.env.MAX_QUESTION_CHARS, 500),
+
+  /**
    * Generous ceiling: the backend proxies to a local LLM whose own timeout is
    * `LOCAL_LLM_TIMEOUT_SECONDS` (120s by default), so a cache miss can legitimately
    * take minutes on cold hardware.

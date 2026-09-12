@@ -19,6 +19,13 @@ export interface ChatRequest {
   question: string;
 }
 
+/** `app/schemas.py::GuardrailInfo` — the verdict when the input guardrail refused. */
+export interface GuardrailInfo {
+  label: string;
+  similarity: number;
+  action: string;
+}
+
 /** `app/schemas.py::ChatResponse` */
 export interface ChatResponse {
   answer: string;
@@ -28,6 +35,23 @@ export interface ChatResponse {
   cache_similarity: number | null;
   /** Only populated on a MISS — KB retrieval is skipped entirely on a hit. */
   sources: SourceFAQ[];
+  /**
+   * `app/schemas.py::ChatResponse.guardrail` — set only when the input
+   * guardrail blocked the question, in which case `answer` is its canned
+   * response and no LLM call was made.
+   */
+  guardrail?: GuardrailInfo | null;
+  /**
+   * `app/schemas.py::ChatResponse.not_cached_reason` — why the answer was not
+   * written to the cache (`too_short`, `refusal`, `ungrounded`,
+   * `generation_failed`). The answer still reached the user either way.
+   */
+  not_cached_reason?: string | null;
+  /**
+   * `app/schemas.py::ChatResponse.cached_now` — true only when this request's
+   * answer was freshly written to the cache. False on a hit and on a block.
+   */
+  cached_now?: boolean;
 }
 
 /**

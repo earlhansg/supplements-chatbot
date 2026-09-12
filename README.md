@@ -290,9 +290,34 @@ The API response always includes `is_cached: true/false` (see
   "answer": "Once your order ships, you'll get a confirmation email...",
   "is_cached": true,          // hit/miss flag the UI badges directly
   "cache_similarity": 0.883,  // non-null only on a hit
-  "sources": []               // populated only on a miss — a hit skips KB retrieval
+  "sources": [],              // populated only on a miss — a hit skips KB retrieval
+
+  "guardrail": null,          // set only when the input guardrail blocked the
+                              // question, e.g.
+                              // {"label": "blocked:medical_advice",
+                              //  "similarity": 0.923, "action": "block"}
+                              // — in which case `answer` is its canned
+                              // response and no LLM call was made
+  "not_cached_reason": null,  // why the answer was not written to the cache:
+                              // too_short | refusal | ungrounded |
+                              // generation_failed. The answer still reached
+                              // the user either way
+  "cached_now": false         // true only when this request's answer was
+                              // freshly cached; false on a hit and on a block
 }
 ```
+
+Error statuses:
+
+| Status | Condition |
+|--------|-----------|
+| `422`  | Empty question, or longer than `MAX_QUESTION_CHARS` (Pydantic validation) |
+| `429`  | Rate limit exceeded — `RATE_LIMIT_MAX_REQUESTS` per `RATE_LIMIT_WINDOW_SECONDS`, with a `Retry-After` header |
+| `502`  | The LLM backend is unreachable. Only misses need it; hits keep working |
+
+The Next.js proxy at `/api/chat` mirrors the length bound and returns `400` at
+that boundary, so the browser sees the failure before the request reaches
+FastAPI.
 
 `GET /health` → `{"status": "ok"}`. No authentication; this is a local demo.
 
@@ -436,10 +461,13 @@ API key or network access is needed for embeddings after that.
 uvicorn app.main:app --reload
 ```
 
-On startup the app creates both RediSearch indexes and, if the knowledge
+On startup the app creates all three RediSearch indexes and, if the knowledge
 base is empty, automatically embeds and loads the 10 sample FAQs from
-`data/faqs.json`. To reseed manually instead (e.g. after editing the FAQ
-file), run:
+`data/faqs.json`. It also seeds the guardrail exemplars from
+`data/guardrail_examples.json` whenever `idx:guardrail`'s document count
+differs from that file's length. Editing an exemplar's *text* without changing
+the count leaves the count matching, so re-seed explicitly for that — and to
+reseed either collection manually, run:
 
 ```bash
 python scripts/load_kb.py

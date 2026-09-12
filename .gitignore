@@ -2,3 +2,10 @@
 __pycache__/
 *.pyc
 .venv/
+
+AI workspace
+.agents
+.claude
+CLAUDE.md
+frontend/CLAUDE.md
+frontend/AGENTS.md

@@ -16,6 +16,12 @@ with a VECTOR field (HNSW, COSINE) on `$.embedding`. Looking up the cache is
 a KNN search for the single nearest neighbour; if its cosine similarity is
 above `CACHE_SIMILARITY_THRESHOLD` we treat it as a cache hit, even if the
 new question is worded differently from the one that was originally cached.
+
+Both functions here take the question's embedding as a parameter rather than
+computing it. The workflow embeds each question exactly once (in its
+`embed_question` node) and shares that one symmetric vector between the
+guardrail KNN and the cache KNN, so the safety layer costs a ~2 ms search
+instead of a second ~15 ms encode.
 """
 
 import uuid
@@ -26,7 +32,6 @@ from redis.commands.search.query import Query
 from redis.exceptions import ResponseError
 
 from app.config import settings
-from app.embeddings import generate_embedding
 from app.redis_client import redis_client
 from app.vector_utils import floats_to_bytes
 
@@ -62,10 +67,13 @@ def create_cache_index() -> None:
             raise
 
 
-def check_cache(query: str) -> dict | None:
-    """Look up the nearest cached question. Returns {answer, similarity} on a hit, else None."""
-    query_vector = generate_embedding(query)
+def check_cache(query: str, embedding: list[float]) -> dict | None:
+    """Look up the nearest cached question. Returns {answer, similarity} on a hit, else None.
 
+    `query` is unused by the search itself — the vector is what matches — but is
+    kept for signature symmetry with `save_cache`, which stores it, and so a
+    future log line here has the question text to hand.
+    """
     search_query = (
         Query("*=>[KNN 1 @embedding $vec AS score]")
         .sort_by("score")
@@ -75,7 +83,7 @@ def check_cache(query: str) -> dict | None:
     )
 
     results = redis_client.ft(CACHE_INDEX).search(
-        search_query, query_params={"vec": floats_to_bytes(query_vector)}
+        search_query, query_params={"vec": floats_to_bytes(embedding)}
     )
 
     if not results.docs:
@@ -90,9 +98,7 @@ def check_cache(query: str) -> dict | None:
     return {"answer": doc.answer, "similarity": similarity}
 
 
-def save_cache(query: str, answer: str) -> None:
+def save_cache(query: str, answer: str, embedding: list[float]) -> None:
     key = f"{CACHE_PREFIX}{uuid.uuid4()}"
-    embedding = generate_embedding(query)
-
     redis_client.json().set(key, "$", {"query": query, "answer": answer, "embedding": embedding})
     redis_client.expire(key, settings.cache_ttl_seconds)
