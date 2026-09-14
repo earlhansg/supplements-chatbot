@@ -2,6 +2,15 @@
 export const CACHE_POLL_INTERVAL_MS = 4_000;
 
 /**
+ * How long a refresh must run before the panel admits to being busy.
+ *
+ * A local poll resolves in ~10ms — under a single frame — so surfacing every
+ * one of them made the spinner strobe once per interval while telling the
+ * reader nothing. Past this threshold the wait is real and worth showing.
+ */
+export const SLOW_REFRESH_MS = 250;
+
+/**
  * Starter questions for the empty chat, ordered so the demo works top to bottom:
  * ask an original, then the paraphrase below it.
  *

@@ -58,7 +58,6 @@ reaches the client bundle.
 | ---------------------------- | ------------------------ | ---------------------------------------------------- |
 | `BACKEND_URL`                | `http://127.0.0.1:8000`  | uvicorn host running `app.main:app`                  |
 | `REDIS_URL`                  | `redis://127.0.0.1:6379` | Same Redis the backend uses; read-only from here     |
-| `CACHE_TTL_SECONDS`          | `86400`                  | Must match the backend — used to derive entry age    |
 | `CACHE_SIMILARITY_THRESHOLD` | `0.78`                   | Display only; shown as the hit threshold             |
 | `CACHE_LIST_LIMIT`           | `100`                    | Max entries listed in the left panel                 |
 | `CHAT_TIMEOUT_MS`            | `150000`                 | Ceiling for one `/chat` call                         |
@@ -105,10 +104,18 @@ Three consequences worth knowing:
 - **Response time is measured client-side.** The backend returns no timing
   field, so the clock starts before the `fetch` and stops when the body is
   parsed. That total includes the proxy hop, which is sub-millisecond locally.
-- **Cache entries have no timestamp.** A `cache:<uuid>` document is
-  `{query, answer, embedding}` and nothing else, so "cached 3h ago" is derived
-  from the key's remaining TTL against `CACHE_TTL_SECONDS`. It is approximate by
-  construction, and shows as "no expiry" if a key somehow lost its TTL.
+- **Cache entries carry their own `created_at`.** A `cache:<uuid>` document
+  also stores `hits`, `kb_anchor` and `model` alongside the question, answer and
+  embedding, so "cached 3h ago" is a real age rather than an inference from the
+  remaining TTL — and the two `.env` files no longer have to agree on
+  `CACHE_TTL_SECONDS`. None of those fields are in the index schema; RediSearch
+  returns them via the explicit `RETURN $.path AS alias` form. A document
+  written before those fields existed renders as "age unknown" with no hit
+  chip, and ages out within the backend's TTL.
+- **The header's hit rate comes from `GET /stats`**, fetched by the same 4s poll
+  as the entry list. It is fetched with `Promise.allSettled`, so a backend that
+  is down hides the hit rate without blanking the rows — Redis alone is enough
+  to keep the panel useful.
 
 ## Architecture notes
 

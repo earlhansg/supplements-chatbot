@@ -170,9 +170,10 @@ Design notes worth calling out:
 - **Response time is measured in the browser**, around the `fetch`, because the
   backend returns no timing field. The request log's "107× faster" line is
   computed from those measurements.
-- **Cache entries carry no timestamp** — the stored document is
-  `{query, answer, embedding}` and nothing else — so "1m ago" is derived from the
-  key's remaining TTL against `CACHE_TTL_SECONDS`.
+- **Cache entries carry their own `created_at`**, so "1m ago" is a real age read
+  off the document rather than an approximation from the key's remaining TTL.
+  The panel also shows a per-entry hit count and a live hit rate from
+  `GET /stats`, both of which move while you use the app.
 - **The request log is deliberately ephemeral.** No polling, no log endpoint, no
   persistence; it is session state and clears on refresh.
 - **Degraded states are explicit.** Redis unreachable, `idx:cache` not created
@@ -227,7 +228,12 @@ query against `idx:kb` to pull the 3 most relevant FAQs as context for the LLM.
 {
   "query": "how long till my refund shows up",
   "answer": "Once we receive and inspect your return, refunds are processed within 3-5 business days...",
-  "embedding": [0.0231, -0.0198, ...]
+  "embedding": [0.0231, -0.0198, ...],
+
+  "created_at": 1757635200,
+  "hits": 3,
+  "kb_anchor": "faq-004",
+  "model": "BAAI/bge-base-en-v1.5"
 }
 ```
 
@@ -239,10 +245,36 @@ Index `idx:cache` (same shape as `idx:kb`, over the `cache:` prefix):
 | `$.answer`     | `answer` | TEXT                                       |
 | `$.embedding`  | `embedding` | VECTOR (HNSW, COSINE, DIM 768, FLOAT32) |
 
+**The four metadata fields are deliberately not in the index schema.**
+RediSearch returns an unindexed JSON path given the explicit `RETURN $.path AS
+alias` form, so both the backend and the dashboard read them at no cost, and
+adding them to the schema would buy nothing — nothing filters or sorts on them
+inside Redis. Keeping them out also means adding them needed no `FT.ALTER`, no
+index drop, and no volume wipe.
+
+| Field        | Why it exists                                                                 |
+|--------------|-------------------------------------------------------------------------------|
+| `created_at` | Epoch seconds at write time. The dashboard shows a real age instead of inferring one from the remaining TTL. |
+| `hits`       | `JSON.NUMINCRBY`'d on every hit, so you can see which entries earn their TTL.  |
+| `kb_anchor`  | The top `idx:kb` match at write time — which FAQ the answer was grounded in. Free: the miss path had already retrieved it. |
+| `model`      | Makes an embedding-model swap visible in the data rather than only in `.env`.  |
+
+**`JSON.NUMINCRBY` does not reset the key's TTL** — measured against this
+container: a key at `TTL 1000` read back `999` after an increment and a short
+wait, i.e. it kept decaying normally. That is the property that makes the
+per-entry counter safe to keep inside the document: counting a popular entry
+can never make it immortal.
+
 Every `cache:*` key gets a Redis `EXPIRE` set to `CACHE_TTL_SECONDS`
 (default 24h), so entries age out on their own — no separate cleanup job.
-Because RediSearch keeps its index in sync with keyspace expirations, an
-expired entry simply stops showing up in KNN results.
+RediSearch keeps its index in sync with keyspace expirations, so an expired
+entry stops showing up in KNN results. One caveat worth publishing rather than
+hiding: that is precisely true on Redis 8, and approximate on the **Redis 7.4**
+this container actually runs, where [expiration times are not taken into account
+when computing the result
+set](https://redis.io/docs/latest/develop/ai/search-and-query/advanced-concepts/expiration/).
+So a count like `/stats`'s `cache_entries` can transiently include entries that
+have expired but not yet been actively reclaimed.
 
 **Cache lookup logic:** embed the incoming question, run `KNN 1` against
 `idx:cache`, convert the returned cosine distance to a similarity
@@ -258,21 +290,46 @@ wording differs.
 ## Workflow (LangGraph)
 
 ```
-START -> check_cache --(hit)--> END
-             |
-          (miss)
-             v
-      retrieve_context -> generate_answer -> save_cache -> END
+START -> embed_question -> check_guardrail --(blocked)--> record_blocked -> END
+                                |
+                             (allowed)
+                                v
+                           check_cache --(hit)--> record_hit -> END
+                                |
+                             (miss)
+                                v
+                  retrieve_context -> generate_answer -> check_answer --(skip)--> record_miss -> END
+                                                             |                         ^
+                                                          (cache)                      |
+                                                             v                         |
+                                                        save_cache ---------------------
 ```
 
-1. **check_cache** — embed the question, KNN search `idx:cache`. On a hit,
-   set `is_cached=True`, log `CACHE HIT`, and route straight to `END`.
-2. **retrieve_context** (miss only) — KNN search `idx:kb` for the top-K
+1. **embed_question** — embed the question once, symmetrically (no bge query
+   prefix). Both the guardrail and the cache compare question ↔ question, so
+   they share this one vector; only KB retrieval re-embeds, with
+   `is_query=True`, because that comparison is question → passage.
+2. **check_guardrail** — KNN search `idx:guardrail`. A refusal ends the request
+   here: no LLM call, and `idx:cache` is never searched.
+3. **check_cache** — KNN search `idx:cache`. On a hit, set `is_cached=True`,
+   log `CACHE HIT`, and route to `record_hit`.
+4. **retrieve_context** (miss only) — KNN search `idx:kb` for the top-K
    relevant FAQs.
-3. **generate_answer** — call the LLM with the FAQ context + question.
-4. **save_cache** — embed the question again and store `{query, answer,
-   embedding}` under a fresh `cache:<uuid>` key with a TTL. Logs `CACHE
-   MISS / NOT CACHED`.
+5. **generate_answer** — call the LLM with the FAQ context + question.
+6. **check_answer** — the output guardrail, a gate on the cache *write* rather
+   than on the response. A rejected answer still reaches the user; only the
+   cache entry is suppressed, and `not_cached_reason` says why.
+7. **save_cache** — store the question, answer, the embedding already computed
+   in step 1, and the four metadata fields under a fresh `cache:<uuid>` key
+   with a TTL. Logs `CACHE MISS / NOT CACHED`.
+8. **record_hit / record_miss / record_blocked** — terminal nodes that each
+   increment one counter (`app/metrics.py`). Counting lives here rather than
+   inside `check_cache` so that every path through the graph increments exactly
+   once, including a path that begins as a hit and is later rejected.
+
+`record_miss` has two incoming edges — a written answer and a suppressed one
+are both misses — and still counts once, because only one of those paths runs
+per request.
 
 The API response always includes `is_cached: true/false` (see
 `app/schemas.py::ChatResponse`).
@@ -302,8 +359,12 @@ The API response always includes `is_cached: true/false` (see
                               // too_short | refusal | ungrounded |
                               // generation_failed. The answer still reached
                               // the user either way
-  "cached_now": false         // true only when this request's answer was
+  "cached_now": false,        // true only when this request's answer was
                               // freshly cached; false on a hit and on a block
+  "cached_hits": 3            // the matched entry's hit total after this
+                              // request. Set only on a hit, and null even then
+                              // for an entry written before cache documents
+                              // carried a `hits` field
 }
 ```
 
@@ -318,6 +379,33 @@ Error statuses:
 The Next.js proxy at `/api/chat` mirrors the length bound and returns `400` at
 that boundary, so the browser sees the failure before the request reaches
 FastAPI.
+
+`GET /stats`
+
+```jsonc
+{
+  "hits": 12,                 // lifetime cache hits
+  "misses": 7,                // lifetime misses (answered by the LLM)
+  "blocked": 2,               // lifetime guardrail refusals
+  "total": 19,                // hits + misses. Blocked questions never reached
+                              // the cache, so they are not in the denominator
+  "hit_rate": 0.6315789473684211,
+  "llm_calls_avoided": 12,    // the same number as `hits`, under the name that
+                              // states the point: every hit is a generation
+                              // that never happened
+  "cache_entries": 7,         // live docs in idx:cache, from the same
+                              // FT.SEARCH the dashboard runs — so /stats and
+                              // the cache panel can never disagree
+  "today": { "hits": 5, "misses": 2 }   // current UTC day; these keys expire
+                                        // after STATS_DAILY_TTL_SECONDS
+}
+```
+
+The counters live in Redis as plain strings under `cache:stats:` (see
+`app/metrics.py`), and every path through the graph increments exactly one of
+them from a terminal node, so hits + misses + blocked always equals the number
+of requests answered. `/stats` is deliberately **not** rate limited: the
+limiter exists to bound LLM spend, not to ration a handful of Redis reads.
 
 `GET /health` → `{"status": "ok"}`. No authentication; this is a local demo.
 
@@ -603,7 +691,18 @@ To clear only the cache (keeping the knowledge base), so the next questions are
 guaranteed misses:
 
 ```bash
-docker compose exec redis redis-cli --scan --pattern 'cache:*' | \
+docker compose exec redis redis-cli --scan --pattern 'cache:*' | grep -v '^cache:stats:' | \
+  xargs -r docker compose exec -T redis redis-cli DEL
+```
+
+The `grep -v` matters: the metrics counters (`app/metrics.py`) live at
+`cache:stats:*`, which `cache:*` also matches. They survive this sweep on
+purpose — clearing the cache to force a few misses should not silently reset
+the hit rate you were measuring. Reset the counters separately when that is
+actually what you want:
+
+```bash
+docker compose exec redis redis-cli --scan --pattern 'cache:stats:*' | \
   xargs -r docker compose exec -T redis redis-cli DEL
 ```
 
@@ -624,14 +723,15 @@ supplements-chatbot/
 │   ├── embeddings.py        # local sentence-transformers embeddings wrapper
 │   ├── knowledge_base.py    # kb:* documents + idx:kb (RediSearch)
 │   ├── semantic_cache.py    # cache:* documents + idx:cache (RediSearch)
+│   ├── metrics.py           # cache:stats:* counters behind GET /stats
 │   ├── llm.py               # chat wrapper -> hosted OpenAI
 │   ├── llm_local.py         # chat wrapper -> local OpenAI-compatible server
 │   ├── workflow.py          # LangGraph StateGraph
-│   └── main.py              # FastAPI app + /chat endpoint
+│   └── main.py              # FastAPI app + /chat and /stats endpoints
 ├── frontend/                # Next.js 16 dashboard
 │   ├── src/app/
 │   │   ├── page.tsx         # Server Component: first read of idx:cache
-│   │   └── api/             # chat proxy, cache reader, status probe
+│   │   └── api/             # chat proxy, cache reader, stats proxy, status probe
 │   ├── src/components/      # Dashboard + the three panels
 │   ├── src/lib/             # redis client, backend client, polling hook
 │   └── README.md            # frontend docs + the API contract it targets

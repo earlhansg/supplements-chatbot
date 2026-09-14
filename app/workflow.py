@@ -1,22 +1,25 @@
 """
 LangGraph workflow:
 
-    START -> embed_question -> check_guardrail --(blocked)--> END
+    START -> embed_question -> check_guardrail --(blocked)--> record_blocked -> END
                                     |
                                  (allowed)
                                     v
-                               check_cache --(hit)--> END
+                               check_cache --(hit)--> record_hit -> END
                                     |
                                  (miss)
                                     v
-                      retrieve_context -> generate_answer -> check_answer --(skip)--> END
-                                                                 |
-                                                              (cache)
-                                                                 v
-                                                            save_cache -> END
+                      retrieve_context -> generate_answer -> check_answer --(skip)--> record_miss -> END
+                                                                 |                         ^
+                                                              (cache)                      |
+                                                                 v                         |
+                                                            save_cache ---------------------
 
 Every branch here is a real conditional edge, not an `if` inside a node — the
 routing decisions are the thing the graph is showing off.
+
+Each of the three outcomes ends in its own terminal recording node, so every
+path through the graph increments exactly one counter (see `app/metrics.py`).
 """
 
 from typing import TypedDict
@@ -28,6 +31,7 @@ from app.guardrails import check_input, should_cache
 from app.knowledge_base import retrieve_context
 # from app.llm import generate_answer  # swap for app.llm_local to use the local server
 from app.llm_local import generate_answer
+from app.metrics import record_blocked, record_hit, record_miss
 from app.semantic_cache import check_cache, save_cache
 
 
@@ -44,6 +48,13 @@ class ChatState(TypedDict, total=False):
     guardrail: dict
     not_cached_reason: str
     cached_now: bool
+    # The `cache:<uuid>` key of the entry a hit matched. Carried so the terminal
+    # record_hit node can bump that entry's own counter without re-running the
+    # search. An id, not a document — state stays small.
+    cache_key: str
+    # That entry's hit total after this request. None for an entry written
+    # before cache documents carried a `hits` field.
+    cached_hits: int
 
 
 def embed_question_node(state: ChatState) -> dict:
@@ -76,7 +87,12 @@ def check_cache_node(state: ChatState) -> dict:
 
     if hit:
         print(f'CACHE HIT (similarity={hit["similarity"]:.3f}) for: "{state["question"]}"')
-        return {"answer": hit["answer"], "is_cached": True, "cache_similarity": hit["similarity"]}
+        return {
+            "answer": hit["answer"],
+            "is_cached": True,
+            "cache_similarity": hit["similarity"],
+            "cache_key": hit["key"],
+        }
 
     print(f'CACHE MISS / NOT CACHED for: "{state["question"]}"')
     return {"is_cached": False}
@@ -119,8 +135,35 @@ def route_after_answer_check(state: ChatState) -> str:
 
 
 def save_cache_node(state: ChatState) -> dict:
-    save_cache(state["question"], state["answer"], state["question_embedding"])
+    context = state.get("context", [])
+    # context is sorted by ascending KNN distance, so [0] is the best FAQ match.
+    # Free: the miss path already paid for this search.
+    kb_anchor = context[0]["id"] if context else None
+    save_cache(state["question"], state["answer"], state["question_embedding"], kb_anchor)
     return {"cached_now": True}
+
+
+# Counting lives in terminal nodes, not inside check_cache, so that every path
+# through the graph increments exactly one of hits / misses / blocked. It also
+# keeps the door open for a path that *begins* as a cache hit and is then
+# rejected — a rejection like that has to count as a single miss, which is
+# unreachable once check_cache has already counted a hit.
+
+
+def record_hit_node(state: ChatState) -> dict:
+    return {"cached_hits": record_hit(state["cache_key"])}
+
+
+def record_miss_node(state: ChatState) -> dict:
+    record_miss()
+    # Nothing to add to state — a node must still return a partial state dict,
+    # and an empty one is how you say "I changed nothing".
+    return {}
+
+
+def record_blocked_node(state: ChatState) -> dict:
+    record_blocked()
+    return {}
 
 
 def build_chat_workflow():
@@ -133,22 +176,33 @@ def build_chat_workflow():
     graph.add_node("generate_answer", generate_answer_node)
     graph.add_node("check_answer", check_answer_node)
     graph.add_node("save_cache", save_cache_node)
+    graph.add_node("record_hit", record_hit_node)
+    graph.add_node("record_miss", record_miss_node)
+    graph.add_node("record_blocked", record_blocked_node)
 
     graph.add_edge(START, "embed_question")
     graph.add_edge("embed_question", "check_guardrail")
     # A blocked question ends here: no LLM call, and idx:cache is never searched.
     graph.add_conditional_edges(
-        "check_guardrail", route_after_guardrail, {"blocked": END, "allowed": "check_cache"}
+        "check_guardrail",
+        route_after_guardrail,
+        {"blocked": "record_blocked", "allowed": "check_cache"},
     )
     graph.add_conditional_edges(
-        "check_cache", route_after_cache_check, {"hit": END, "miss": "retrieve_context"}
+        "check_cache", route_after_cache_check, {"hit": "record_hit", "miss": "retrieve_context"}
     )
     graph.add_edge("retrieve_context", "generate_answer")
     graph.add_edge("generate_answer", "check_answer")
     graph.add_conditional_edges(
-        "check_answer", route_after_answer_check, {"cache": "save_cache", "skip": END}
+        "check_answer", route_after_answer_check, {"cache": "save_cache", "skip": "record_miss"}
     )
-    graph.add_edge("save_cache", END)
+    # record_miss has two incoming edges — a written answer and a suppressed one
+    # are both misses. Only one of the two paths runs per request, so it still
+    # counts exactly once.
+    graph.add_edge("save_cache", "record_miss")
+    graph.add_edge("record_hit", END)
+    graph.add_edge("record_miss", END)
+    graph.add_edge("record_blocked", END)
 
     return graph.compile()
 

@@ -52,15 +52,46 @@ export interface ChatResponse {
    * answer was freshly written to the cache. False on a hit and on a block.
    */
   cached_now?: boolean;
+  /**
+   * `app/schemas.py::ChatResponse.cached_hits` — the matched entry's hit total
+   * after this request. Set only on a hit, and null even then for an entry
+   * written before cache documents carried a `hits` field.
+   */
+  cached_hits?: number | null;
+}
+
+/** `app/schemas.py::DailyStats` — counters for the current UTC day. */
+export interface DailyStats {
+  hits: number;
+  misses: number;
+}
+
+/** `app/schemas.py::StatsResponse` — what `GET /stats` reports. */
+export interface StatsResponse {
+  hits: number;
+  misses: number;
+  blocked: number;
+  /** `hits + misses`. Blocked questions never reached the cache, so they are
+   *  not in the denominator of `hit_rate`. */
+  total: number;
+  hit_rate: number;
+  /** The same number as `hits`, under the name that states the point. */
+  llm_calls_avoided: number;
+  cache_entries: number;
+  today: DailyStats;
 }
 
 /**
  * One `cache:<uuid>` RedisJSON document, as surfaced by `/api/cache`.
  *
- * The stored document is `{query, answer, embedding}` — there is no timestamp
- * field, so `ageSeconds` is derived from the key's remaining TTL against the
- * backend's configured `CACHE_TTL_SECONDS`. It is approximate by nature and is
- * `null` when the key carries no expiry.
+ * The stored document carries its own `created_at`, so `ageSeconds` is a real
+ * age rather than an inference from the remaining TTL. Both `createdAt` and
+ * `hits` are `null` for a document written before the backend added those
+ * fields; such entries age out within `CACHE_TTL_SECONDS`.
+ *
+ * Note the deliberate casing split: the wire-contract types above keep
+ * snake_case, while `CacheEntry` is this app's own view model assembled in
+ * `lib/redis.ts` and uses camelCase throughout.
  */
 export interface CacheEntry {
   key: string;
@@ -68,6 +99,10 @@ export interface CacheEntry {
   answer: string;
   ttlSeconds: number | null;
   ageSeconds: number | null;
+  /** Times this entry has been served from the cache. Null on a legacy document. */
+  hits: number | null;
+  /** Epoch seconds. Null on a legacy document. */
+  createdAt: number | null;
 }
 
 export interface CacheListResponse {

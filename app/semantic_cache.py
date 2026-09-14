@@ -7,8 +7,22 @@ RedisJSON document at `cache:<uuid>`:
     {
       "query": "original user question",
       "answer": "LLM-generated answer",
-      "embedding": [1536 floats]   # embedding of `query`
+      "embedding": [768 floats],   # embedding of `query`
+
+      "created_at": 1757635200,    # epoch seconds, real write time
+      "hits": 0,                   # JSON.NUMINCRBY'd on every hit
+      "kb_anchor": "faq-003",      # top idx:kb match at write time
+      "model": "BAAI/bge-base-en-v1.5"
     }
+
+The four metadata fields are **not in the index schema**, and deliberately so.
+RediSearch can return an unindexed JSON path via `RETURN $.path AS alias`, so
+reading them costs nothing and adding them to the schema would buy nothing —
+nothing filters or sorts on them inside Redis. `created_at` is what lets the
+frontend show a real age instead of inferring one from the remaining TTL;
+`hits` is what makes a popular entry visible; `model` makes an embedding-model
+swap visible in the data rather than only in `.env`; `kb_anchor` records which
+FAQ the answer was grounded in, for verification of borderline matches.
 
 with a Redis key TTL (`EXPIRE`) applied so entries age out automatically.
 A RediSearch index `idx:cache` is built ON JSON over the `cache:*` prefix
@@ -24,6 +38,7 @@ guardrail KNN and the cache KNN, so the safety layer costs a ~2 ms search
 instead of a second ~15 ms encode.
 """
 
+import time
 import uuid
 
 from redis.commands.search.field import TextField, VectorField
@@ -68,7 +83,7 @@ def create_cache_index() -> None:
 
 
 def check_cache(query: str, embedding: list[float]) -> dict | None:
-    """Look up the nearest cached question. Returns {answer, similarity} on a hit, else None.
+    """Look up the nearest cached question. Returns {answer, similarity, key} on a hit, else None.
 
     `query` is unused by the search itself — the vector is what matches — but is
     kept for signature symmetry with `save_cache`, which stores it, and so a
@@ -95,10 +110,37 @@ def check_cache(query: str, embedding: list[float]) -> dict | None:
     if similarity < settings.cache_similarity_threshold:
         return None
 
-    return {"answer": doc.answer, "similarity": similarity}
+    # `doc.id` is the matched `cache:<uuid>` key. Returned so the caller can
+    # bump that entry's own hit counter without re-running the search.
+    return {"answer": doc.answer, "similarity": similarity, "key": doc.id}
 
 
-def save_cache(query: str, answer: str, embedding: list[float]) -> None:
+def save_cache(
+    query: str, answer: str, embedding: list[float], kb_anchor: str | None = None
+) -> None:
+    """Write one cache entry. `kb_anchor` defaults to None so the signature stays callable
+    from anywhere; the workflow supplies the FAQ id it already retrieved."""
     key = f"{CACHE_PREFIX}{uuid.uuid4()}"
-    redis_client.json().set(key, "$", {"query": query, "answer": answer, "embedding": embedding})
+    redis_client.json().set(
+        key,
+        "$",
+        {
+            "query": query,
+            "answer": answer,
+            "embedding": embedding,
+            # --- metadata, none of it indexed ---
+            # Real write time, so the frontend no longer has to infer an age by
+            # subtracting the remaining TTL from CACHE_TTL_SECONDS.
+            "created_at": int(time.time()),
+            "hits": 0,
+            # Top idx:kb match at write time. Free here — the miss path already
+            # retrieved it. Records which FAQ this answer was grounded in, so a
+            # borderline cache match can later be confirmed against the same FAQ.
+            "kb_anchor": kb_anchor,
+            # Makes an embedding-model swap visible in the data rather than only
+            # in .env: entries written by a different model are identifiable
+            # instead of silently incomparable.
+            "model": settings.embedding_model,
+        },
+    )
     redis_client.expire(key, settings.cache_ttl_seconds)

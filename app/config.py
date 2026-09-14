@@ -60,5 +60,9 @@ class Settings(BaseSettings):
     rate_limit_max_requests: int = 30
     rate_limit_window_seconds: int = 60
 
+    # Per-day stats counters (app/metrics.py). Long enough to show a month of
+    # usage in a demo, short enough that the keyspace cannot grow without bound.
+    stats_daily_ttl_seconds: int = 2_592_000  # 30 days
+
 
 settings = Settings()

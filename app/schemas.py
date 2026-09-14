@@ -45,3 +45,31 @@ class ChatResponse(BaseModel):
     # True only when this request's answer was freshly cached. Defaults to
     # False, which is already correct for a hit and for a blocked question.
     cached_now: bool = False
+    # The matched entry's hit total after this request. Set only on a hit, and
+    # None even then for an entry written before cache documents carried a
+    # `hits` field — those age out within CACHE_TTL_SECONDS.
+    cached_hits: int | None = None
+
+
+class DailyStats(BaseModel):
+    """Counters for the current UTC day. Expire after STATS_DAILY_TTL_SECONDS."""
+
+    hits: int
+    misses: int
+
+
+class StatsResponse(BaseModel):
+    """What GET /stats reports — see app/metrics.py for where each number lives."""
+
+    hits: int
+    misses: int
+    blocked: int
+    # hits + misses. Blocked questions never reached the cache, so they are not
+    # in the denominator of `hit_rate`.
+    total: int
+    hit_rate: float
+    # Named for the reader rather than the data: it equals `hits`, and it is the
+    # entire economic argument for the cache in one field.
+    llm_calls_avoided: int
+    cache_entries: int
+    today: DailyStats

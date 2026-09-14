@@ -9,8 +9,9 @@ from fastapi.responses import JSONResponse
 from app.config import settings
 from app.guardrails import GUARDRAIL_INDEX, create_guardrail_index, load_guardrail_examples
 from app.knowledge_base import KB_INDEX, create_kb_index, load_faqs
+from app.metrics import read_stats
 from app.rate_limit import enforce_rate_limit
-from app.schemas import ChatRequest, ChatResponse
+from app.schemas import ChatRequest, ChatResponse, StatsResponse
 from app.semantic_cache import create_cache_index
 from app.workflow import chat_workflow
 
@@ -97,4 +98,17 @@ def chat(request: ChatRequest, _: None = Depends(enforce_rate_limit)):
         guardrail=result.get("guardrail"),
         not_cached_reason=result.get("not_cached_reason"),
         cached_now=result.get("cached_now", False),
+        cached_hits=result.get("cached_hits"),
     )
+
+
+@app.get("/stats", response_model=StatsResponse)
+def stats():
+    """Live counters for the semantic cache.
+
+    Deliberately not rate limited: it is a handful of Redis reads and a
+    count, and the limiter exists to bound LLM spend, not to ration cheap
+    reads. A plain `def` for the same reason every other Redis-touching
+    handler is one — it belongs in the threadpool, not on the event loop.
+    """
+    return read_stats()

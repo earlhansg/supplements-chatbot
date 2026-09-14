@@ -15,13 +15,6 @@ export const serverConfig = {
 
   redisUrl: process.env.REDIS_URL ?? "redis://127.0.0.1:6379",
 
-  /**
-   * Must match `CACHE_TTL_SECONDS` in the backend's `.env`. Used only to turn a
-   * key's remaining TTL back into an approximate age, since cache documents
-   * carry no timestamp of their own.
-   */
-  cacheTtlSeconds: num(process.env.CACHE_TTL_SECONDS, 86400),
-
   /** Mirrors the backend's `CACHE_SIMILARITY_THRESHOLD`; displayed in the UI. */
   cacheSimilarityThreshold: num(process.env.CACHE_SIMILARITY_THRESHOLD, 0.78),
 
@@ -46,10 +39,8 @@ export const serverConfig = {
 /** Config values that are safe to hand down to Client Components. */
 export interface PublicConfig {
   cacheSimilarityThreshold: number;
-  cacheTtlSeconds: number;
 }
 
 export const publicConfig: PublicConfig = {
   cacheSimilarityThreshold: serverConfig.cacheSimilarityThreshold,
-  cacheTtlSeconds: serverConfig.cacheTtlSeconds,
 };

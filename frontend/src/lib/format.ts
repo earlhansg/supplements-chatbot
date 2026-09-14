@@ -6,9 +6,14 @@ export function formatDuration(ms: number): string {
   return `${(ms / 1000).toFixed(2)} s`;
 }
 
-/** Compact relative age: `just now`, `4m ago`, `3h ago`, `2d ago`. */
+/**
+ * Compact relative age: `just now`, `4m ago`, `3h ago`, `2d ago`.
+ *
+ * `null` means the document carries no `created_at` — it was written before the
+ * backend added that field — not that the key has no expiry.
+ */
 export function formatAge(seconds: number | null): string {
-  if (seconds === null) return "no expiry";
+  if (seconds === null) return "age unknown";
   if (seconds < 60) return "just now";
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
@@ -33,9 +38,15 @@ export function formatClockTime(epochMs: number): string {
   });
 }
 
-/** Cosine similarity as a percentage: `0.9412` -> `94.1%`. */
+/** A 0-1 fraction as a percentage: `0.9412` -> `94.1%`. */
+export function formatPercent(fraction: number): string {
+  return `${(fraction * 100).toFixed(1)}%`;
+}
+
+/** Cosine similarity as a percentage. Same rendering as any other fraction —
+ *  named separately because that is what call sites at the chat panel mean. */
 export function formatSimilarity(similarity: number): string {
-  return `${(similarity * 100).toFixed(1)}%`;
+  return formatPercent(similarity);
 }
 
 /**
