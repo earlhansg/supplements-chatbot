@@ -36,8 +36,9 @@ from langgraph.graph import END, START, StateGraph
 from app.embeddings import generate_embedding
 from app.guardrails import check_input, should_cache
 from app.knowledge_base import retrieve_context
-# from app.llm import generate_answer  # swap for app.llm_local to use the local server
-from app.llm_local import generate_answer
+# Which backend this resolves to is LLM_BACKEND's business, not this file's.
+# Both app/llm.py and app/llm_local.py stay in the tree; see app/llm_factory.py.
+from app.llm_factory import generate_answer
 from app.metrics import record_blocked, record_hit, record_miss
 from app.semantic_cache import check_cache, save_cache
 

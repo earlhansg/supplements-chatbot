@@ -53,6 +53,7 @@ instead of a second ~15 ms encode.
 
 import time
 import uuid
+from collections.abc import Callable
 
 from redis.commands.search.field import TextField, VectorField
 from redis.commands.search.index_definition import IndexDefinition, IndexType
@@ -122,6 +123,94 @@ def _verdict(
     }
 
 
+def classify_match(
+    similarity: float,
+    entry_anchor: str | None,
+    entry_margin: float | None,
+    resolve_incoming: Callable[[], dict | None],
+) -> dict:
+    """Decide which band a cache match falls in. No I/O of its own.
+
+    `resolve_incoming` is a zero-argument callable, not a resolved anchor, for
+    one reason that is a contract rather than an optimisation: the confident
+    band must return before any KB lookup is issued, so the fast path costs
+    exactly one KNN. Passing a value would force the caller to pay for the
+    lookup it is trying to skip. It is called at most once.
+
+    Returns {"band", "entry_anchor", "incoming_anchor"} in every case — one
+    shape, like `_verdict()`, so no caller tests for absent keys. `band` is one
+    of confident | verified | unverified | rejected | miss. Both anchor ids are
+    populated only on the two bands where the comparison actually ran, which is
+    the same convention `_verdict()` follows and the reason a confident hit
+    reports no anchors: it never looked one up.
+
+    Pure, so the evaluation harness (`scripts/eval_threshold.py`) scores the
+    *shipped* decision rather than a re-implementation of it. A published table
+    that does not call this function is a table that will eventually lie.
+    """
+
+    def band(name: str, compared: dict | None = None) -> dict:
+        return {
+            "band": name,
+            # `compared` is the resolved incoming anchor, passed only by the two
+            # branches that actually compared the two ids.
+            "entry_anchor": entry_anchor if compared else None,
+            "incoming_anchor": compared["id"] if compared else None,
+        }
+
+    # Below the lower bound nothing else is worth deciding. Kept here rather
+    # than in the caller so the harness gets the same three-way decision the
+    # runtime makes; `check_cache` still turns this into `_verdict(hit=False)`.
+    if similarity < settings.cache_similarity_threshold:
+        return band("miss")
+
+    # --- Band 1: confident. Close enough that verification could only cost time.
+    # Returning here before any anchor work is a contract, not an optimisation:
+    # the fast path must issue exactly one KNN, as it did before this band logic.
+    if similarity >= settings.cache_hit_threshold_high:
+        return band("confident")
+
+    # --- Band 2: grey. Similar enough to be a candidate, not similar enough to
+    # trust on cosine alone.
+    if not settings.cache_verify_grey_band:
+        # Kill switch: the pre-verification behaviour exactly — serve it. The
+        # band is still reported, so the response shape does not vary with the
+        # flag and the two modes stay comparable.
+        return band("unverified")
+
+    if entry_anchor is None or entry_margin is None:
+        # An entry written before this phase has nothing to verify against. Treat
+        # it as a miss rather than serving it unchecked: the re-answer overwrites
+        # the gap with a document that carries both fields, so the cache heals
+        # itself one entry at a time instead of staying permanently unverifiable.
+        return band("miss")
+
+    incoming = resolve_incoming()
+
+    # An empty KB leaves nothing to anchor against — reachable only mid-reseed,
+    # and not a reason to reject a match that already cleared the threshold.
+    if incoming is None:
+        return band("unverified")
+
+    # The margin guard. When either side's top FAQ barely beat its runner-up,
+    # that side's anchor is a coin flip between two near-duplicate FAQs and
+    # carries no information — it may not veto, and equally it may not confirm,
+    # so an agreeing pair of untrusted anchors still serves as `unverified`.
+    if (
+        incoming["margin"] < settings.cache_anchor_margin_min
+        or entry_margin < settings.cache_anchor_margin_min
+    ):
+        return band("unverified")
+
+    # Both anchors are decisive, so they mean something. Landing on the same FAQ
+    # is what separates a rewording from a merely related question.
+    if incoming["id"] == entry_anchor:
+        return band("verified", compared=incoming)
+
+    # Rejected: close on cosine, but about a different FAQ.
+    return band("rejected", compared=incoming)
+
+
 def check_cache(query: str, embedding: list[float]) -> dict:
     """Look up the nearest cached question and decide which band it falls in.
 
@@ -130,6 +219,9 @@ def check_cache(query: str, embedding: list[float]) -> dict:
     "nothing was close" apart from "something was close and was rejected". That
     near-miss score is the whole point of the grey band and must survive the
     return.
+
+    The band decision itself lives in `classify_match()`; this function owns the
+    KNN and the verdict assembly, and nothing else.
 
     `query` is not used by the search itself — the vector is what matches — but
     it is what `anchor_for()` re-embeds in the grey band, and `save_cache`
@@ -158,66 +250,40 @@ def check_cache(query: str, embedding: list[float]) -> dict:
     doc = results.docs[0]
     similarity = 1 - float(doc.score)
 
-    if similarity < settings.cache_similarity_threshold:
+    # Every FT.SEARCH value arrives as a string, and an absent JSON path drops
+    # the attribute entirely (a JSON null yields None), so read both defensively.
+    entry_anchor = getattr(doc, "kb_anchor", None)
+    entry_margin_raw = getattr(doc, "kb_anchor_margin", None)
+
+    decision = classify_match(
+        similarity,
+        entry_anchor,
+        float(entry_margin_raw) if entry_margin_raw is not None else None,
+        # A lambda, not `anchor_for(query)`: the confident band must return
+        # before this Redis round trip + is_query encode is ever paid for.
+        resolve_incoming=lambda: anchor_for(query),
+    )
+    band = decision["band"]
+    anchors = {
+        "entry_anchor": decision["entry_anchor"],
+        "incoming_anchor": decision["incoming_anchor"],
+    }
+
+    if band == "miss":
         return _verdict(hit=False)
 
     # `doc.id` is the matched `cache:<uuid>` key. Carried so the caller can bump
     # that entry's own hit counter without re-running the search.
     served = {"similarity": similarity, "answer": doc.answer, "key": doc.id}
 
-    # --- Band 1: confident. Close enough that verification could only cost time.
-    # Returning here before any anchor work is a contract, not an optimisation:
-    # the fast path must issue exactly one KNN, as it did before this band logic.
-    if similarity >= settings.cache_hit_threshold_high:
-        return _verdict(hit=True, band="confident", **served)
+    if band == "rejected":
+        # The similarity rides along so the caller can report the near miss
+        # instead of reporting silence.
+        return _verdict(hit=False, band=band, similarity=similarity, **anchors)
 
-    # --- Band 2: grey. Similar enough to be a candidate, not similar enough to
-    # trust on cosine alone.
-    if not settings.cache_verify_grey_band:
-        # Kill switch: the pre-verification behaviour exactly — serve it. The
-        # band is still reported, so the response shape does not vary with the
-        # flag and the two modes stay comparable.
-        return _verdict(hit=True, band="unverified", **served)
-
-    # Every FT.SEARCH value arrives as a string, and an absent JSON path drops
-    # the attribute entirely (a JSON null yields None), so read both defensively.
-    entry_anchor = getattr(doc, "kb_anchor", None)
-    entry_margin_raw = getattr(doc, "kb_anchor_margin", None)
-
-    if entry_anchor is None or entry_margin_raw is None:
-        # An entry written before this phase has nothing to verify against. Treat
-        # it as a miss rather than serving it unchecked: the re-answer overwrites
-        # the gap with a document that carries both fields, so the cache heals
-        # itself one entry at a time instead of staying permanently unverifiable.
-        return _verdict(hit=False)
-
-    entry_margin = float(entry_margin_raw)
-    incoming = anchor_for(query)
-
-    # An empty KB leaves nothing to anchor against — reachable only mid-reseed,
-    # and not a reason to reject a match that already cleared the threshold.
-    if incoming is None:
-        return _verdict(hit=True, band="unverified", **served)
-
-    # The margin guard. When either side's top FAQ barely beat its runner-up,
-    # that side's anchor is a coin flip between two near-duplicate FAQs and
-    # carries no information — it may not veto, and equally it may not confirm,
-    # so an agreeing pair of untrusted anchors still serves as `unverified`.
-    if (
-        incoming["margin"] < settings.cache_anchor_margin_min
-        or entry_margin < settings.cache_anchor_margin_min
-    ):
-        return _verdict(hit=True, band="unverified", **served)
-
-    # Both anchors are decisive, so they mean something. Landing on the same FAQ
-    # is what separates a rewording from a merely related question.
-    anchors = {"entry_anchor": entry_anchor, "incoming_anchor": incoming["id"]}
-    if incoming["id"] == entry_anchor:
-        return _verdict(hit=True, band="verified", **served, **anchors)
-
-    # Rejected: close on cosine, but about a different FAQ. The similarity rides
-    # along so the caller can report the near miss instead of reporting silence.
-    return _verdict(hit=False, band="rejected", similarity=similarity, **anchors)
+    # confident | verified | unverified — all hits, differing only in what they
+    # cost to establish.
+    return _verdict(hit=True, band=band, **served, **anchors)
 
 
 def save_cache(

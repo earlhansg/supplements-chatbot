@@ -7,5 +7,20 @@ services:
     volumes:
       - redis-data:/data
 
+  # Tests cannot isolate themselves in a second logical database: RediSearch
+  # refuses FT.CREATE on any db but 0 ("Cannot create index on db != 0",
+  # measured on this container), so isolation has to be a separate instance.
+  # Profile-gated, so a normal `docker compose up -d` does not start it, and
+  # volume-less, so every run begins empty. CI gets the same thing from its
+  # service container.
+  #
+  # redis-stack-SERVER, not redis-stack: same modules, no RedisInsight, which a
+  # test instance has no use for.
+  redis-test:
+    image: redis/redis-stack-server:latest
+    profiles: ["test"]
+    ports:
+      - "6380:6379"
+
 volumes:
   redis-data:

@@ -4,10 +4,11 @@ server (e.g. local-openai.exe on http://127.0.0.1:8080) instead of the
 hosted OpenAI API.
 
 Same public surface as `app.llm` — `SYSTEM_PROMPT` and `generate_answer` —
-so switching is a one-line import change in `app/workflow.py`:
+which is what lets `app/llm_factory.py` treat the two as interchangeable.
+Selecting between them is the `LLM_BACKEND` setting, not a source edit:
 
-    from app.llm import generate_answer        # hosted OpenAI
-    from app.llm_local import generate_answer  # local OpenAI-compatible server
+    LLM_BACKEND=local    # this module
+    LLM_BACKEND=openai   # app/llm.py
 
 The local server needs no real credentials; it accepts any api_key, so
 LOCAL_LLM_API_KEY defaults to a placeholder. Run `GET /v1/models` on the

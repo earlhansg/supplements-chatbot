@@ -13,6 +13,13 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     chat_model: str = "gpt-4o-mini"
 
+    # Which backend app/llm_factory.py resolves `generate_answer` from:
+    # "local" (app/llm_local.py, an OpenAI-compatible server on
+    # LOCAL_LLM_BASE_URL) or "openai" (app/llm.py, the hosted API). Any other
+    # value raises at import rather than falling back. Run GET /v1/models on a
+    # local server to see which model ids it accepts.
+    llm_backend: str = "local"
+
     # Local OpenAI-compatible server (used by app/llm_local.py). The server
     # ignores credentials, so the key is a placeholder.
     local_llm_base_url: str = "http://127.0.0.1:8080/v1"
@@ -48,25 +55,44 @@ class Settings(BaseSettings):
     # between two near-duplicate FAQs, and an undecided anchor must not reject a
     # match that already cleared the lower threshold.
     #
-    # 0.05 is derived from 10 FAQs and 6 question pairs on this corpus — that is
-    # evidence, not calibration. It is a PLACEHOLDER pending the labelled sweep
-    # of a later phase, exactly like `guardrail_threshold`. Raise it to trust the
-    # anchor less (more matches served unverified), lower it to trust it more
-    # (more matches rejected on a narrow anchor win). Corpus- AND
-    # model-dependent: re-measure after editing data/faqs.json.
+    # Measured: `python scripts/eval_threshold.py` over data/eval_pairs.json (23
+    # labelled pairs). Sweeping this value holds F1 flat at 0.880 across the
+    # whole band 0.03-0.10, so 0.05 was TESTED AND KEPT rather than merely
+    # inherited — it sits in the middle of the widest optimum, not on an edge.
+    # Either side of that band is measurably worse on this corpus: at <=0.02 the
+    # guard stops protecting the refunds pair whose anchors are a coin flip
+    # (margins 0.021 / 0.032) and recall falls 0.846 -> 0.769; at >=0.15 the
+    # guard swallows the shipping anchors too (margins 0.125 / 0.108) and the
+    # 0.809 false hit is served again, doubling the false-hit rate to 0.200.
+    #
+    # Raise it to trust the anchor less (more matches served unverified), lower
+    # it to trust it more (more matches rejected on a narrow anchor win).
+    # Corpus- AND model-dependent: re-run that sweep after editing data/faqs.json
+    # or swapping the embedding model.
     cache_anchor_margin_min: float = 0.05
 
     kb_retrieval_k: int = 3
 
-    # Semantic input guardrail (app/guardrails.py). `guardrail_threshold` is a
-    # PLACEHOLDER, not a measured value — the evaluation harness that would tune
-    # it against a labelled set is a later phase. Like
-    # `cache_similarity_threshold` it is embedding-model-dependent: bge's cosine
-    # similarities run lower than OpenAI's, so never copy this number across a
+    # Semantic input guardrail (app/guardrails.py).
+    #
+    # Measured: `python scripts/eval_guardrail.py` over data/guardrail_eval.json
+    # (24 held-out questions, no text shared with the exemplars) picks 0.55 as
+    # the F1-maximising block threshold among the thresholds that actually bind.
+    # The 0.72 this replaced was badly miscalibrated: it sat above the similarity
+    # of 9 of the 12 questions that should have been blocked, scoring F1 0.400 to
+    # 0.55's 0.870 and recall 0.250 to 0.833. The cost of the move is one false
+    # block out of 12 allow questions ("Can I take this on an empty stomach?",
+    # whose nearest exemplar is a medical one at 0.687) — a false-block rate of
+    # 0.083, up from 0.000.
+    #
+    # n=24, so one question is worth ~4% of the set: this is calibration on this
+    # corpus, not a production-grade number. Like `cache_similarity_threshold` it
+    # is embedding-model-dependent — bge's cosine similarities run lower than
+    # OpenAI's — so re-run that sweep rather than carrying the value across a
     # model swap. Raise it to block less (more false allows), lower it to block
     # more (more false blocks on legitimate product questions).
     guardrail_enabled: bool = True
-    guardrail_threshold: float = 0.72
+    guardrail_threshold: float = 0.55
 
     # Output guardrail — the gate on the cache *write*, not on the response.
     # An answer shorter than this is almost certainly truncated or a one-line

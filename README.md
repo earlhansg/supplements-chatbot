@@ -22,8 +22,13 @@ cached entry at **88.3%** similarity and returns in **35 ms**.*
   routing decision that can skip the expensive branch entirely.
 - **RAG done properly** on the miss path: KNN over a FAQ knowledge base supplies
   grounded context before generation.
+- **Verification on top of similarity** — a grey band where a borderline match
+  has to agree with the incoming question's knowledge-base anchor before it is
+  served, which measurably halves the false-hit rate at no cost in recall.
+- **Thresholds that are measured, not guessed** — two sweep harnesses over
+  labelled datasets, whose output is the table published in this README.
 - **Two interchangeable LLM backends** behind one interface — hosted OpenAI or a
-  local OpenAI-compatible server — swapped with a single import.
+  local OpenAI-compatible server — selected by `LLM_BACKEND`.
 - **A frontend that explains the system it's talking to**, surfacing hit/miss,
   similarity scores, response times, and the live contents of the cache index.
 - **No API cost for embeddings.** `BAAI/bge-base-en-v1.5` runs locally via
@@ -42,16 +47,24 @@ cached entry at **88.3%** similarity and returns in **35 ms**.*
       ▼
   FastAPI ──► LangGraph workflow
                   │
+                  ├─ check_guardrail ────► Redis   KNN 1 over idx:guardrail
+                  │       │
+                  │       └─ blocked ─► canned refusal, no LLM, cache untouched
+                  │
                   ├─ check_cache ────────► Redis   KNN 1 over idx:cache
                   │       │
-                  │       ├─ hit  ──► return the stored answer      ~35 ms
+                  │       ├─ hit  ──► return the stored answer      ~41 ms
+                  │       │           (grey band verifies first     ~76 ms)
                   │       │
                   │       └─ miss ──► retrieve_context ──► Redis   KNN 3 over idx:kb
                   │                   generate_answer   ──► LLM
                   │                   save_cache        ──► Redis   new cache:<uuid>
                   ▼                                                 ~3.75 s
-          { answer, is_cached, cache_similarity, sources }
+          { answer, is_cached, cache_similarity, cache_band, sources, ... }
 ```
+
+Each of the three outcomes ends in its own terminal recording node, so every
+request increments exactly one counter behind `GET /stats`.
 
 The browser never talks to FastAPI or Redis directly. The backend registers no
 CORS middleware, so every call is proxied server-side through Next.js — which
@@ -59,20 +72,52 @@ also keeps the Redis connection string out of the client bundle.
 
 ## The core process
 
-Every question takes one of two paths, and the UI labels which one it took.
+Every question takes one of **three** paths, and the UI labels which one it took.
+
+### Blocked — the guardrail path
+
+```
+question ──► embed (local) ──► KNN 1 over idx:guardrail
+                                          │
+                              nearest exemplar is `block`
+                              and similarity ≥ 0.55?
+                                          │ yes
+                              return that exemplar's canned response
+```
+
+The cache is never searched and no LLM call is made. See
+[the guardrail section](#the-input-guardrail-is-a-router-not-a-security-boundary)
+for what that threshold is worth and where it fails.
 
 ### Cache hit — the fast path
 
 ```
 question ──► embed (local) ──► KNN 1 over idx:cache
                                           │
-                                    similarity ≥ 0.78?
-                                          │ yes
-                                    return stored answer      ~35 ms total
+                        ┌─────────────────┼─────────────────┐
+                   sim ≥ 0.90        0.78 ≤ sim < 0.90    sim < 0.78
+                        │                 │                 │
+                   confident          grey band            miss
+                   serve it              │              (full path)
+                   ~41 ms                │
+                            KNN 2 over idx:kb for both
+                            questions' anchor FAQs
+                                         │
+                    ┌────────────────────┼────────────────────┐
+              either anchor        anchors agree         anchors disagree
+              undecided                  │               (both decisive)
+              (margin < 0.05)            │                    │
+                    │                    │                    │
+               unverified            verified             rejected
+               serve it              serve it            → miss path
+                                      ~76 ms          (near miss reported)
 ```
 
-No knowledge-base lookup, no LLM call, no new cache write. `sources` comes back
-empty precisely because retrieval was skipped.
+A confident hit issues **exactly one KNN** — it returns before any anchor
+lookup is even considered, which is why the fast path stayed fast when the grey
+band was added. On a hit there is no knowledge-base lookup, no LLM call and no
+new cache write; `sources` comes back empty precisely because retrieval was
+skipped.
 
 ### Cache miss — the full path
 
@@ -115,22 +160,166 @@ answer and paying per *distinct* answer.
 
 ### The threshold is a real tradeoff
 
-`CACHE_SIMILARITY_THRESHOLD = 0.78` is a tuned guess, and it is wrong in both
-directions. Measured against `BAAI/bge-base-en-v1.5`:
+A single cosine threshold is wrong in both directions. Measured against
+`BAAI/bge-base-en-v1.5`, with the band each pair lands in today:
 
 | Pair | Similarity | Outcome |
 |---|---|---|
-| "How can I track my order?" → "How do I track my package?" | 0.883 | hit ✅ |
-| "Can I cancel my order after placing it?" → "How do I cancel an order I just placed?" | 0.947 | hit ✅ |
+| "How can I track my order?" → "How do I track my package?" | 0.883 | `verified` hit ✅ |
+| "Can I cancel my order after placing it?" → "How do I cancel an order I just placed?" | 0.947 | `confident` hit ✅ |
 | "What is your refund policy?" → "Can I get my money back on an unopened tub?" | 0.673 | **miss** — a fair paraphrase that re-runs the LLM |
-| "How long does shipping take?" → "How much does shipping cost?" | 0.809 | **hit** — but these are different questions |
+| "How long does shipping take?" → "How much does shipping cost?" | 0.809 | `rejected` — caught by anchor verification |
 
-That last row is the dangerous one: with "How long does shipping take?" already
-cached, asking about shipping *cost* scores 0.809 and gets served the *delivery
-time* answer. Raising the threshold fixes it and costs
-recall; lowering it does the reverse. The honest summary is that a single global
-cosine threshold cannot separate "reworded" from "related", and a production
-system would want a re-ranking or verification step on top.
+The third row is still a genuine cost and is not fixed: a paraphrase that the
+embedding scores at 0.673 re-runs the LLM, and no threshold recovers it without
+letting worse matches through.
+
+The fourth row used to be the dangerous one. With "How long does shipping
+take?" cached, asking about shipping *cost* scores 0.809 — comfortably over the
+threshold — and was served the *delivery time* answer. A single global cosine
+threshold genuinely cannot separate "reworded" from "related", which is the
+whole reason the grey band exists: between 0.78 and 0.90 the match is only a
+candidate, and it has to agree with the incoming question's KB anchor before it
+is served. Here `faq-006` (shipping time) and `faq-005` (shipping cost) disagree
+decisively, so the match is declined and the near-miss score is reported instead
+of the wrong answer.
+
+### What that verification actually bought
+
+Not an assertion — a measurement. The harness sweeps both modes over a labelled
+pair set and prints this table:
+
+<!-- BEGIN sweep-cache -->
+```bash
+python scripts/eval_threshold.py
+```
+
+23 labelled pairs (13 should hit, 10 should not), where **`should_hit` is true
+iff the cached answer for `a` fully answers `b`** — a judgement about answers,
+not about wording. Labelling similarity would make the sweep circular.
+
+**`false_hit_rate = FP / (FP + TN)`** — of the pairs that should *not* have been
+served from cache, the fraction that were.
+
+**Mode `single`** — predicted hit iff `similarity >= t` (the pre-verification behaviour):
+
+| Threshold | TP | FP | FN | TN | Precision | Recall | F1 | False-hit rate |
+|---|---|---|---|---|---|---|---|---|
+| 0.740 | 11 | 4 | 2 | 6 | 0.733 | 0.846 | 0.786 | 0.400 |
+| 0.760 | 11 | 3 | 2 | 7 | 0.786 | 0.846 | 0.815 | 0.300 |
+| **0.780** | **11** | **2** | **2** | **8** | **0.846** | **0.846** | **0.846** | **0.200** |
+| 0.800 | 11 | 2 | 2 | 8 | 0.846 | 0.846 | 0.846 | 0.200 |
+| 0.820 | 8 | 1 | 5 | 9 | 0.889 | 0.615 | 0.727 | 0.100 |
+| 0.840 | 8 | 0 | 5 | 10 | 1.000 | 0.615 | 0.762 | 0.000 |
+| 0.900 | 2 | 0 | 11 | 10 | 1.000 | 0.154 | 0.267 | 0.000 |
+
+**Mode `banded`** — the shipped `classify_match()`, `CACHE_HIT_THRESHOLD_HIGH=0.90`,
+`CACHE_ANCHOR_MARGIN_MIN=0.05`:
+
+| Threshold | TP | FP | FN | TN | Precision | Recall | F1 | False-hit rate |
+|---|---|---|---|---|---|---|---|---|
+| 0.740 | 11 | 1 | 2 | 9 | 0.917 | 0.846 | 0.880 | 0.100 |
+| 0.760 | 11 | 1 | 2 | 9 | 0.917 | 0.846 | 0.880 | 0.100 |
+| **0.780** | **11** | **1** | **2** | **9** | **0.917** | **0.846** | **0.880** | **0.100** |
+| 0.800 | 11 | 1 | 2 | 9 | 0.917 | 0.846 | 0.880 | 0.100 |
+| 0.820 | 8 | 1 | 5 | 9 | 0.889 | 0.615 | 0.727 | 0.100 |
+| 0.840 | 8 | 0 | 5 | 10 | 1.000 | 0.615 | 0.762 | 0.000 |
+| 0.900 | 2 | 0 | 11 | 10 | 1.000 | 0.154 | 0.267 | 0.000 |
+
+(The full 13-row sweep from 0.70 to 0.94 is what the command prints; the rows
+around the shipped threshold are reproduced here.)
+<!-- END sweep-cache -->
+
+**At the shipped threshold of 0.78, verification halves the false-hit rate —
+0.200 → 0.100 — and costs nothing in recall (0.846 either way).** That is the
+claim Phase 3 made on six hand-checked pairs, now measured on 23. The one
+remaining false hit is the refunds pair, where both anchors are a coin flip
+between two near-duplicate FAQs and the margin guard correctly refuses to let
+either one veto.
+
+Note what the single-threshold mode cannot do: to reach a 0.100 false-hit rate
+on its own it has to go to 0.820, which drops recall from 0.846 to 0.615. The
+band buys the same precision for free.
+
+`CACHE_ANCHOR_MARGIN_MIN = 0.05` was **tested and kept**, not inherited. F1
+holds flat at 0.880 across the whole band 0.03–0.10, so 0.05 sits in the middle
+of the widest optimum. Outside it the value is measurably worse: at ≤ 0.02 the
+guard stops protecting the coin-flip refunds pair and recall falls to 0.769; at
+≥ 0.15 it swallows the shipping anchors too and the 0.809 false hit is served
+again.
+
+Every number here is relative to this 10-FAQ corpus, this embedding model and
+23 labelled pairs. That is enough to replace anecdote with method and not
+enough to claim a calibrated production threshold. Re-run the command after any
+corpus or model change — a model swap invalidates the table by design.
+
+## The input guardrail is a router, not a security boundary
+
+Before the cache is searched, the question's embedding is matched against 27
+labelled exemplars in `idx:guardrail` (`data/guardrail_examples.json`). If the
+nearest one is a `block` exemplar *and* the similarity clears
+`GUARDRAIL_THRESHOLD`, the question is refused with that exemplar's canned
+response — no LLM call, and the cache is never touched.
+
+The `allowed:` exemplars are load-bearing rather than decoration. Without them
+a legitimate product question like "Is creatine safe?" has nothing nearby to
+land on and drifts toward the nearest blocked cluster.
+
+`GUARDRAIL_THRESHOLD` shipped as an explicit placeholder. It is now measured:
+
+<!-- BEGIN sweep-guardrail -->
+```bash
+python scripts/eval_guardrail.py
+```
+
+24 **held-out** questions (12 should block, 12 should allow) against the 27
+seeded exemplars. No text is shared with `data/guardrail_examples.json` — an
+exemplar scores ~1.0 against itself, so evaluating on the training set would
+manufacture a flattering threshold that says nothing about an unseen question.
+
+**`false_block_rate = FP / (FP + TN)`** — of the questions that should have been
+allowed, the fraction the guardrail refused.
+
+| Threshold | TP | FP | FN | TN | Precision | Recall | F1 | False-block rate |
+|---|---|---|---|---|---|---|---|---|
+| 0.450 | 10 | 1 | 2 | 11 | 0.909 | 0.833 | 0.870 | 0.083 |
+| 0.500 | 10 | 1 | 2 | 11 | 0.909 | 0.833 | 0.870 | 0.083 |
+| **0.550** | **10** | **1** | **2** | **11** | **0.909** | **0.833** | **0.870** | **0.083** |
+| 0.575 | 9 | 1 | 3 | 11 | 0.900 | 0.750 | 0.818 | 0.083 |
+| 0.600 | 8 | 1 | 4 | 11 | 0.889 | 0.667 | 0.762 | 0.083 |
+| 0.700 | 5 | 0 | 7 | 12 | 1.000 | 0.417 | 0.588 | 0.000 |
+| 0.725 | 3 | 0 | 9 | 12 | 1.000 | 0.250 | 0.400 | 0.000 |
+| 0.800 | 1 | 0 | 11 | 12 | 1.000 | 0.083 | 0.154 | 0.000 |
+
+(The full 21-row sweep from 0.40 to 0.90 is what the command prints. The grid
+steps by 0.025, so the retired 0.72 does not appear as a row — `0.725` is the
+nearest, and scores identically.)
+<!-- END sweep-guardrail -->
+
+**The sweep moved the threshold from 0.72 to 0.55.** The old value was badly
+miscalibrated: it sat above the similarity of 9 of the 12 questions that should
+have been blocked, scoring F1 0.400 against 0.55's 0.870 and recall 0.250
+against 0.833. The cost of the move is one false block out of 12 allow
+questions — "Can I take this on an empty stomach?", whose nearest exemplar is a
+medical one at 0.687 — so the false-block rate went from 0.000 to 0.083.
+
+Two findings worth publishing rather than hiding:
+
+- **The threshold is doing less work than it looks.** F1 is nominally highest
+  (0.917) below 0.435, but that is beneath the lowest similarity any question
+  scored, so the gate never binds and the number is really the accuracy of the
+  nearest-exemplar *router* with the threshold switched off. The harness
+  excludes such rows from its recommendation for exactly that reason.
+- **Some errors no threshold can fix.** "Help me debug this JavaScript error."
+  routes to an `allow` exemplar, so it is served at *every* threshold. Fixing
+  that means adding an exemplar, not turning a knob.
+
+**This is best-effort semantic routing, not a security boundary.** It is a
+nearest-neighbour vote over 27 examples. It has a measured 0.083 false-block
+rate and a measured 0.167 miss rate on a 24-question set, both of which will
+move on a different corpus. Do not put it in front of anything that matters, and
+do not read the Next.js proxy as an access control layer either — see
+[what this deliberately does not do](#what-this-deliberately-does-not-do).
 
 ## Tech stack
 
@@ -463,16 +652,28 @@ surface — `SYSTEM_PROMPT` and `generate_answer(question, context)`:
 | `app/llm.py`       | hosted OpenAI (`api.openai.com`)             | `CHAT_MODEL` (`gpt-4o-mini`)     |
 | `app/llm_local.py` | `LOCAL_LLM_BASE_URL` (`127.0.0.1:8080/v1`)   | `LOCAL_CHAT_MODEL` (`sonnet`)    |
 
-Switch between them by editing the one import in `app/workflow.py`:
+Switch between them with one setting — no source edit:
 
-```python
-# from app.llm import generate_answer        # hosted OpenAI
-from app.llm_local import generate_answer    # local server  <- currently active
+```bash
+LLM_BACKEND=local     # app/llm_local.py, the default
+LLM_BACKEND=openai    # app/llm.py, the hosted API
 ```
+
+`app/llm_factory.py` resolves that to a `generate_answer`, importing only the
+branch you asked for — both modules construct an `OpenAI` client at import, so a
+top-level import of both would build a hosted client (and read
+`OPENAI_API_KEY`) on every local run for a function that is never called. Any
+other value raises at import rather than falling back to a default: a typo that
+quietly changed which LLM you are billing for is the failure mode worth being
+loud about.
 
 Nothing else in the app changes — the workflow, cache, and KB behave
 identically either way. Both modules are kept in the repo so you can flip
 back and forth without deleting anything.
+
+> This used to be a commented-out import in `app/workflow.py`. It was a code
+> change to express a deployment choice, which is not something a reader should
+> have to read a diff to discover.
 
 ### Running the local OpenAI-compatible server
 
@@ -559,11 +760,12 @@ commands, and inspect the `kb:*` / `cache:*` documents visually.
 cp .env.example .env
 ```
 
-Then edit `.env` for whichever chat backend you're using:
+Then set `LLM_BACKEND` in `.env` for whichever chat backend you're using:
 
-- **Hosted OpenAI** (`app/llm.py`) — set `OPENAI_API_KEY`. `CHAT_MODEL`
+- **Hosted OpenAI** (`LLM_BACKEND=openai`) — set `OPENAI_API_KEY`. `CHAT_MODEL`
   defaults to `gpt-4o-mini`.
-- **Local server** (`app/llm_local.py`) — no key needed. `OPENAI_API_KEY` can
+- **Local server** (`LLM_BACKEND=local`, the default) — no key needed.
+  `OPENAI_API_KEY` can
   be left empty, and the defaults
   (`LOCAL_LLM_BASE_URL=http://127.0.0.1:8080/v1`, `LOCAL_LLM_API_KEY=unused`,
   `LOCAL_CHAT_MODEL=sonnet`, `LOCAL_LLM_TIMEOUT_SECONDS=120`) work as-is
@@ -632,7 +834,10 @@ Next.js dev server (port 3000). The `local-openai.exe` window logs each
 `POST /v1/chat/completions`, so you can see exactly which questions actually
 reached the LLM versus which were served from the semantic cache.
 
-## Testing it
+## Trying it by hand
+
+Four ways to watch the routing decision happen. For the automated suite, see
+[Testing](#testing).
 
 ### Option A — the UI (`http://localhost:3000`)
 
@@ -766,9 +971,12 @@ supplements-chatbot/
 │   ├── embeddings.py        # local sentence-transformers embeddings wrapper
 │   ├── knowledge_base.py    # kb:* documents + idx:kb (RediSearch)
 │   ├── semantic_cache.py    # cache:* documents + idx:cache (RediSearch)
+│   ├── guardrails.py        # guardrail:* + idx:guardrail, and should_cache()
 │   ├── metrics.py           # cache:stats:* counters behind GET /stats
+│   ├── rate_limit.py        # fixed-window limiter, as a FastAPI dependency
 │   ├── llm.py               # chat wrapper -> hosted OpenAI
 │   ├── llm_local.py         # chat wrapper -> local OpenAI-compatible server
+│   ├── llm_factory.py       # resolves LLM_BACKEND to one of the two above
 │   ├── workflow.py          # LangGraph StateGraph
 │   └── main.py              # FastAPI app + /chat and /stats endpoints
 ├── frontend/                # Next.js 16 dashboard
@@ -778,12 +986,135 @@ supplements-chatbot/
 │   ├── src/components/      # Dashboard + the three panels
 │   ├── src/lib/             # redis client, backend client, polling hook
 │   └── README.md            # frontend docs + the API contract it targets
-├── data/faqs.json           # 10 sample FAQs (knowledge base seed data)
-├── scripts/load_kb.py       # standalone KB loader
-├── docs/screenshots/        # images used in this README
-├── docker-compose.yml       # redis-stack (+ RedisInsight UI on :8001)
+├── data/
+│   ├── faqs.json                # 10 sample FAQs (knowledge base seed data)
+│   ├── guardrail_examples.json  # 27 labelled exemplars (guardrail seed data)
+│   ├── eval_pairs.json          # 23 labelled pairs — the cache sweep's test set
+│   └── guardrail_eval.json      # 24 HELD-OUT questions — the guardrail's test set
+├── scripts/
+│   ├── load_kb.py               # standalone KB + exemplar loader
+│   ├── eval_threshold.py        # cache threshold/band sweep -> markdown
+│   └── eval_guardrail.py        # guardrail threshold sweep -> markdown
+├── tests/                       # pytest suite (see Testing, below)
+├── .github/workflows/ci.yml     # pytest over a Redis Stack service container
+├── docs/screenshots/            # images used in this README
+├── docker-compose.yml           # redis-stack (+ RedisInsight on :8001), redis-test
+├── pytest.ini
+├── requirements.txt
+├── requirements-dev.txt         # -r requirements.txt plus pytest
 └── .env.example
 ```
+
+## Testing
+
+The suite is pytest, and it needs **its own Redis instance**. RediSearch refuses
+to create an index on any logical database but 0 — measured on this container:
+
+```
+$ docker compose exec -T redis redis-cli -n 15 FT.CREATE idx:__probe ON JSON \
+    PREFIX 1 probe: SCHEMA '$.t' AS t TEXT
+Cannot create index on db != 0
+```
+
+So tests cannot isolate themselves in `redis://127.0.0.1:6379/15`. Isolation has
+to be a separate instance, which `docker-compose.yml` provides behind a profile
+so a normal `docker compose up -d` does not start it:
+
+```bash
+pip install -r requirements-dev.txt
+docker compose --profile test up -d redis-test   # :6380, no volume, starts empty
+pytest
+```
+
+`tests/conftest.py` points the app at `:6380` by writing `REDIS_URL` **before**
+the first `app` import — `app/redis_client.py` opens its connection at import
+time, so a fixture-level monkeypatch would be too late and would silently test
+the demo instance. Real environment variables outrank `.env` in
+pydantic-settings, so this needs no change to your `.env`.
+
+It also refuses to run against `:6379` at all, because the suite creates and
+deletes `kb:*`, `cache:*`, `guardrail:*`, `cache:stats:*` and `rl:*` keys and
+that is the instance you are probably mid-demo with. CI sets `ALLOW_DEV_REDIS=1`
+because its service container *is* the throwaway instance; nothing else should.
+
+| Command | What it runs |
+|---|---|
+| `pytest` | everything |
+| `pytest -m "not redis"` | the pure subset — `classify_match()` and `should_cache()`, no Redis needed |
+| `pytest tests/test_semantic_cache.py -v` | the band decisions, including the 0.809 rejection |
+
+No test requires a reachable LLM: `tests/test_workflow.py` and
+`tests/test_rate_limit.py` stub `app.workflow.generate_answer`. That stub has to
+patch the name in `app.workflow`, not in `app.llm_local` — `app/workflow.py`
+binds it into its own namespace at import, so patching the source module leaves
+the compiled graph calling the real backend and the test hangs for the local
+server's 120 s timeout instead of failing.
+
+What the suite pins down, in the order it matters:
+
+- the band boundaries, and that the **confident path issues zero anchor
+  lookups** — asserted with an injected callable that records whether it was
+  called, rather than left as a comment
+- the margin guard, including that an undecided anchor may not veto *even when
+  the anchors disagree*
+- the grey-band rejection of the documented 0.809 false hit
+- the self-healing rule for pre-Phase-3 cache documents, which a 24 h TTL makes
+  the normal state for a day after any deploy
+- all four `should_cache` reasons and their precedence
+- that `JSON.NUMINCRBY` does not reset a key's TTL, so a popular entry cannot
+  become immortal
+- that every path through the graph increments **exactly one** counter
+
+CI (`.github/workflows/ci.yml`) runs that suite against a
+`redis/redis-stack-server` service container, plus the frontend's `eslint` and
+`tsc --noEmit`.
+
+## What this deliberately does not do
+
+Some of these are missing because they are hard. Most are missing because adding
+them would make the repo worse at the one thing it is for.
+
+**No authentication, anywhere.** This is a local demo. The Next.js proxy keeps
+`REDIS_URL` and `BACKEND_URL` out of the client bundle — that is bundle secrecy,
+not an access boundary, and describing it as security would be wrong.
+
+**No chat or session persistence.** `POST /chat` takes a bare question; the
+conversation lives in browser React state and the request log clears on refresh.
+This is a position, not an omission, and the reason is the cache: **its entire
+value is that one user's answer serves another user's rephrasing.** Scoping the
+lookup per session would destroy exactly what is being demonstrated. So the
+cache is global on purpose, and there are no `session:*` keys to find.
+
+**The guardrail is best-effort filtering.** A nearest-neighbour vote over 27
+examples, with a measured false-block rate — not a moderation service and not a
+security control. See [above](#the-input-guardrail-is-a-router-not-a-security-boundary).
+
+**The rate limiter is effectively global.** Every request arrives from the
+Next.js proxy, so `request.client.host` is the proxy's address for all users.
+Its purpose is bounding LLM spend — a miss is a multi-second generation — not
+isolating callers from each other. No forwarded-client header is trusted,
+deliberately: doing so would be spoofable in an app with no auth *and* would
+imply per-user isolation this topology cannot deliver.
+
+**Single node.** No Cluster, Sentinel, or replication. One Redis, one uvicorn.
+
+**Things that were considered and rejected**, so the reasoning is visible rather
+than lost in a planning document:
+
+| Candidate | Why not |
+|---|---|
+| Pub/Sub replacing the 4 s cache-panel poll | Real-time for its own sake. The poll is documented, works, and demos fine; a WebSocket layer teaches nothing about semantic caching |
+| Redis Streams as this repo's request log | This README argues the log is ephemeral by design. Don't contradict your own reasoning to add a data type |
+| Full chat history in Redis | See above — a session-scoped cache is a strictly worse cache |
+| Exact-match cache keyed by question hash | The semantic cache already subsumes it; a second layer confuses the story to save ~15 ms |
+| Redis as a job queue, multi-tenancy, auth | Off-story for a local reference implementation |
+| Redis Vector Sets (`VADD` / `VSIM`) as an alternative backend | Genuinely interesting and directly on-story, but it would double the cache surface area of a repo whose strength is being readable in one sitting. Belongs in its own comparison |
+| RedisTimeSeries hit-rate sparkline | Wants `/stats` to exist first, which it now does — but it is charting, not caching |
+
+The nearest thing to a real gap: a FAQ edit leaves dependent cache entries stale
+for up to `CACHE_TTL_SECONDS`. The fix is small and known — index `kb_anchor` as
+a TAG on `idx:cache`, then `FT.SEARCH idx:cache "@kb_anchor:{faq-005}"` and
+`DEL` the matches — and it is not implemented here.
 
 ## Background
 
