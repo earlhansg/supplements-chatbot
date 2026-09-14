@@ -100,6 +100,13 @@ export interface AssistantMessage {
   similarity: number | null;
   sources: SourceFAQ[];
   durationMs: number;
+  /**
+   * Non-null when the input guardrail refused the question. That path ends the
+   * graph before `check_cache` runs, so `isCached === false` here means "the
+   * cache was never consulted" and not "the cache was searched and missed" —
+   * the UI must render those two as different states.
+   */
+  guardrail: GuardrailInfo | null;
 }
 
 export interface ErrorMessage {
@@ -111,7 +118,8 @@ export interface ErrorMessage {
 
 export type ChatMessage = UserMessage | AssistantMessage | ErrorMessage;
 
-export type LogStatus = "hit" | "miss" | "error";
+/** `blocked` is the guardrail path: no cache lookup, no LLM call, no KB retrieval. */
+export type LogStatus = "hit" | "miss" | "blocked" | "error";
 
 /**
  * One row in the right-hand request log. Purely client-side session state —
@@ -125,7 +133,10 @@ export interface LogEntry {
   durationMs: number;
   /** Epoch ms, stamped when the response landed. */
   at: number;
+  /** Cache-entry similarity on a hit. Null on a miss, an error, and a block. */
   similarity: number | null;
   sourceCount: number;
+  /** The refusing exemplar, on a `blocked` row only. Carries its own similarity. */
+  guardrail: GuardrailInfo | null;
   error?: string;
 }

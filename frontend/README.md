@@ -87,11 +87,20 @@ From `app/schemas.py`:
   "answer": "Standard shipping typically takes 3-5 business days…",
   "is_cached": true,          // drives the Hit/Miss badge — nothing is inferred
   "cache_similarity": 0.94,   // non-null only on a hit
-  "sources": []               // populated only on a miss (KB retrieval is skipped on a hit)
+  "sources": [],              // populated only on a miss (KB retrieval is skipped on a hit)
+  "guardrail": null,          // non-null only when the input guardrail refused
+  "cached_now": false         // true only when this request wrote a cache entry
 }
 ```
 
-Two consequences worth knowing:
+Three consequences worth knowing:
+
+- **The badge has three states, not two.** `guardrail` is checked before
+  `is_cached`, because a refused question ends the LangGraph run at
+  `check_guardrail` and `idx:cache` is never searched. The backend still reports
+  `is_cached: false` there, but it means *skipped*, not *missed* — so those
+  render as `Guardrail: <topic>` + `Cache Skipped`, and the request log keeps
+  them out of the hit/miss averages that the "N× faster" figure is built from.
 
 - **Response time is measured client-side.** The backend returns no timing
   field, so the clock starts before the `fetch` and stops when the body is
@@ -112,9 +121,9 @@ hidden.
 
 **One request feeds two panels.** `Dashboard.tsx` owns `sendQuestion`, so a
 single `/api/chat` call appends both the chat message and the request-log row
-with the same measured duration. A miss also triggers an immediate cache
-refresh rather than waiting out the poll interval, so the new entry appears in
-the left panel right away.
+with the same measured duration. A request that actually wrote an entry
+(`cached_now`) also triggers an immediate cache refresh rather than waiting out
+the poll interval, so the new entry appears in the left panel right away.
 
 **The request log is session state and nothing more.** No polling, no backend
 log endpoint, no persistence — plain React state, gone on refresh, as intended.

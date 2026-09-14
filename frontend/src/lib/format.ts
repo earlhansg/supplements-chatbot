@@ -38,6 +38,18 @@ export function formatSimilarity(similarity: number): string {
   return `${(similarity * 100).toFixed(1)}%`;
 }
 
+/**
+ * `blocked:medical_advice` -> `Medical advice`.
+ *
+ * Guardrail labels are stored as `<action>:<topic>` (see `app/guardrails.py`).
+ * The action half is dropped because the badge already says it was blocked;
+ * only the topic tells the reader anything new.
+ */
+export function formatGuardrailLabel(label: string): string {
+  const topic = label.slice(label.indexOf(":") + 1).replace(/_/g, " ");
+  return topic.charAt(0).toUpperCase() + topic.slice(1);
+}
+
 /** `cache:8f3ad2e1-...-9c` -> `cache:8f3ad2e1` — enough to identify a row without wrapping. */
 export function shortKey(key: string): string {
   const separator = key.indexOf(":");

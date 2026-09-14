@@ -51,10 +51,15 @@ export function PanelBody({
  * Cache-hit green vs cache-miss amber is the single most important visual in
  * the app, so the two tones differ in hue, border and text weight — not just
  * shade — and each carries an explicit word rather than relying on colour alone.
+ *
+ * `blocked` is a third status of the same rank: violet sits well away from both
+ * the green and the amber, so a guardrail refusal is never mistaken for either
+ * outcome of a cache lookup that, in its case, never happened.
  */
 const BADGE_TONES = {
   hit: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
   miss: "border-amber-500/40 bg-amber-500/10 text-amber-300",
+  blocked: "border-violet-500/40 bg-violet-500/10 text-violet-300",
   error: "border-rose-500/40 bg-rose-500/10 text-rose-300",
   neutral: "border-zinc-700 bg-zinc-800/60 text-zinc-400",
   info: "border-sky-500/30 bg-sky-500/10 text-sky-300",

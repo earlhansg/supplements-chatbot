@@ -81,6 +81,7 @@ export function Dashboard({
 
         const data = (await response.json()) as ChatResponse;
         const durationMs = performance.now() - startedAt;
+        const guardrail = data.guardrail ?? null;
 
         setMessages((current) => [
           ...current,
@@ -92,6 +93,7 @@ export function Dashboard({
             similarity: data.cache_similarity,
             sources: data.sources ?? [],
             durationMs,
+            guardrail,
           },
         ]);
 
@@ -99,17 +101,25 @@ export function Dashboard({
           {
             id: newId(),
             question,
-            status: data.is_cached ? "hit" : "miss",
+            // Checked before `is_cached`, because the backend reports
+            // `is_cached: false` on a block as well — there it means the cache
+            // was skipped entirely, which is a third outcome, not a miss.
+            status: guardrail ? "blocked" : data.is_cached ? "hit" : "miss",
             durationMs,
             at: Date.now(),
             similarity: data.cache_similarity,
             sourceCount: data.sources?.length ?? 0,
+            guardrail,
           },
           ...current,
         ]);
 
-        // A miss just wrote a new `cache:<uuid>` document — show it immediately.
-        if (!data.is_cached) refreshCache();
+        // `cached_now` rather than `!is_cached`: only a request that actually
+        // wrote a `cache:<uuid>` document has anything new for the left panel.
+        // A block writes nothing, and so does a miss the output guardrail
+        // rejected — refreshing for those would poll for an entry that isn't
+        // coming.
+        if (data.cached_now) refreshCache();
       } catch (caught) {
         const durationMs = performance.now() - startedAt;
         const message =
@@ -129,6 +139,7 @@ export function Dashboard({
             at: Date.now(),
             similarity: null,
             sourceCount: 0,
+            guardrail: null,
             error: message,
           },
           ...current,

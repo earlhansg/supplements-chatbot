@@ -84,6 +84,12 @@ export const AlertIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const ShieldIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M12 2.5 4.5 5.5v6c0 4.5 3.1 8.6 7.5 10 4.4-1.4 7.5-5.5 7.5-10v-6L12 2.5Z" />
+  </Icon>
+);
+
 export const ChevronIcon = (props: IconProps) => (
   <Icon {...props}>
     <path d="m7 10 5 5 5-5" />

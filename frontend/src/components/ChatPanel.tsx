@@ -9,9 +9,16 @@ import { useEffect, useRef, useState } from "react";
 
 import { SUGGESTED_QUESTIONS } from "@/lib/constants";
 import { cx } from "@/lib/cx";
-import { formatDuration, formatSimilarity } from "@/lib/format";
+import { formatDuration, formatGuardrailLabel, formatSimilarity } from "@/lib/format";
 import type { AssistantMessage, ChatMessage, ErrorMessage } from "@/lib/types";
-import { AlertIcon, BoltIcon, ChatIcon, ChevronIcon, SendIcon } from "@/components/icons";
+import {
+  AlertIcon,
+  BoltIcon,
+  ChatIcon,
+  ChevronIcon,
+  SendIcon,
+  ShieldIcon,
+} from "@/components/icons";
 import { Badge, EmptyState, PanelBody, PanelHeader } from "@/components/ui";
 
 export function ChatPanel({
@@ -86,7 +93,7 @@ export function ChatPanel({
             </div>
           </div>
         ) : (
-          <div className="mx-auto flex max-w-3xl flex-col gap-5 py-5">
+          <div className="mx-auto flex max-w-3xl flex-col gap-5 py-5" aria-live="polite">
             {messages.map((message) => (
               <MessageBubble key={message.id} message={message} />
             ))}
@@ -167,7 +174,23 @@ function AssistantBubble({ message }: { message: AssistantMessage }) {
       </div>
 
       <div className="flex flex-wrap items-center gap-2 pl-1">
-        {message.isCached ? (
+        {/*
+          Three outcomes, not two. A guardrail block ends the LangGraph run at
+          `check_guardrail`, so `idx:cache` is never searched — labelling that
+          "Cache Miss" would claim a lookup that never happened, and would put a
+          50 ms row in among the 3-second ones the miss badge stands for.
+        */}
+        {message.guardrail ? (
+          <>
+            <Badge tone="blocked">
+              <ShieldIcon className="size-3" />
+              Guardrail: {formatGuardrailLabel(message.guardrail.label)}
+            </Badge>
+            <Badge tone="neutral" className="font-normal">
+              Cache Skipped
+            </Badge>
+          </>
+        ) : message.isCached ? (
           <Badge tone="hit">
             <BoltIcon className="size-3" />
             Cache Hit
@@ -180,7 +203,14 @@ function AssistantBubble({ message }: { message: AssistantMessage }) {
           {formatDuration(message.durationMs)}
         </span>
 
-        {message.similarity !== null ? (
+        {message.guardrail ? (
+          <span
+            className="text-[11px] text-zinc-600"
+            title="Cosine similarity between this question and the guardrail exemplar that refused it"
+          >
+            {formatSimilarity(message.guardrail.similarity)} exemplar match
+          </span>
+        ) : message.similarity !== null ? (
           <span
             className="text-[11px] text-zinc-600"
             title="Cosine similarity between this question and the cached one"
