@@ -49,6 +49,20 @@ class ChatResponse(BaseModel):
     # None even then for an entry written before cache documents carried a
     # `hits` field — those age out within CACHE_TTL_SECONDS.
     cached_hits: int | None = None
+    # Which band the cache lookup landed in: `confident` (served on similarity
+    # alone), `verified` (grey band, KB anchors agreed), `unverified` (grey
+    # band, an anchor was too undecided to be asked) or `rejected` (grey band,
+    # anchors disagreed, so this is a miss). None on a plain miss and on a
+    # block, where no band was ever decided.
+    #
+    # Populated regardless of CACHE_VERIFY_GREY_BAND, so the response shape
+    # never varies with the flag — the two modes have to be comparable against
+    # one client.
+    cache_band: str | None = None
+    # The near-miss score of an entry declined on an anchor mismatch. Set only
+    # when `cache_band == "rejected"`, and the only place that number survives:
+    # without it a rejection is indistinguishable from an ordinary miss.
+    rejected_similarity: float | None = None
 
 
 class DailyStats(BaseModel):

@@ -21,6 +21,13 @@ export const SLOW_REFRESH_MS = 250;
  *   "How do refunds work?"                  vs refund policy   -> 0.873
  *   "How many days until my order arrives?" vs shipping time   -> 0.817
  *
+ * Both land in the grey band (0.78-0.90), so both are now anchor-verified
+ * rather than served on similarity alone — and both come back as `unverified`
+ * hits, because on this 10-FAQ corpus neither pair's KB anchor is decisive
+ * enough to be asked: the two refunds FAQs are near-duplicates (margins 0.021
+ * and 0.032) and the shipping question beats its runner-up by 0.001. An
+ * undecided anchor may not veto a match, so they keep working.
+ *
  * Worth knowing when picking your own: plausible-sounding paraphrases can still
  * fall short. "Can I get my money back on an unopened tub?" scores only 0.673
  * against "What is your refund policy?" and comes back as a miss.

@@ -233,6 +233,7 @@ query against `idx:kb` to pull the 3 most relevant FAQs as context for the LLM.
   "created_at": 1757635200,
   "hits": 3,
   "kb_anchor": "faq-004",
+  "kb_anchor_margin": 0.125,
   "model": "BAAI/bge-base-en-v1.5"
 }
 ```
@@ -245,7 +246,7 @@ Index `idx:cache` (same shape as `idx:kb`, over the `cache:` prefix):
 | `$.answer`     | `answer` | TEXT                                       |
 | `$.embedding`  | `embedding` | VECTOR (HNSW, COSINE, DIM 768, FLOAT32) |
 
-**The four metadata fields are deliberately not in the index schema.**
+**The five metadata fields are deliberately not in the index schema.**
 RediSearch returns an unindexed JSON path given the explicit `RETURN $.path AS
 alias` form, so both the backend and the dashboard read them at no cost, and
 adding them to the schema would buy nothing — nothing filters or sorts on them
@@ -257,6 +258,7 @@ index drop, and no volume wipe.
 | `created_at` | Epoch seconds at write time. The dashboard shows a real age instead of inferring one from the remaining TTL. |
 | `hits`       | `JSON.NUMINCRBY`'d on every hit, so you can see which entries earn their TTL.  |
 | `kb_anchor`  | The top `idx:kb` match at write time — which FAQ the answer was grounded in. Free: the miss path had already retrieved it. |
+| `kb_anchor_margin` | How far that FAQ beat the runner-up. The anchor alone cannot say whether it is trustworthy: two near-duplicate FAQs produce a top-1 pick that is a coin flip, and a coin flip must never veto a later match. Also free — same search. |
 | `model`      | Makes an embedding-model swap visible in the data rather than only in `.env`.  |
 
 **`JSON.NUMINCRBY` does not reset the key's TTL** — measured against this
@@ -277,15 +279,38 @@ So a count like `/stats`'s `cache_entries` can transiently include entries that
 have expired but not yet been actively reclaimed.
 
 **Cache lookup logic:** embed the incoming question, run `KNN 1` against
-`idx:cache`, convert the returned cosine distance to a similarity
-(`1 - score`), and treat it as a hit only if `similarity >=
-CACHE_SIMILARITY_THRESHOLD` (default `0.78`, calibrated for
-`BAAI/bge-base-en-v1.5` — its cosine similarities run lower than OpenAI's for
-same-topic paraphrases, so this threshold is model-dependent; re-tune it if
-you swap embedding models). This is what makes it a
-*semantic* cache — "how long till my refund shows up" can hit a cache
-entry saved for "How long does it take to get my refund?" even though the
-wording differs.
+`idx:cache`, and convert the returned cosine distance to a similarity
+(`1 - score`). That similarity then falls into one of three bands rather than
+being tested against a single line:
+
+| Band | Range | What happens |
+|---|---|---|
+| **confident** | `similarity >= CACHE_HIT_THRESHOLD_HIGH` (0.90) | Served immediately. No verification lookup is issued at all, so the fast path stays as fast as it was. |
+| **grey** | `CACHE_SIMILARITY_THRESHOLD <= similarity < 0.90` | Verified before it is served — see below. |
+| **miss** | `similarity < CACHE_SIMILARITY_THRESHOLD` (0.78) | Answered from scratch, as before. |
+
+In the **grey band** the incoming question's *KB anchor* — its nearest `idx:kb`
+FAQ, resolved with one `KNN 2` — is compared against the anchor the cache entry
+recorded at write time. Two questions that reword each other land on the same
+FAQ; two questions that merely share a topic land on different ones. Agreement
+serves the cached answer (`verified`); disagreement rejects it (`rejected`) and
+the request takes the full path.
+
+That comparison is only worth making when the anchor is actually decisive, so it
+is gated by a **margin guard**: when either side's top FAQ beat its runner-up by
+less than `CACHE_ANCHOR_MARGIN_MIN`, that anchor is a coin flip between two
+near-duplicate FAQs and carries no information. It is then permitted neither to
+veto nor to confirm, and the match is served as `unverified`. `0.05` is a
+starting point derived from this 10-FAQ corpus, not a calibrated value.
+
+`CACHE_VERIFY_GREY_BAND=false` restores the single-threshold behaviour exactly —
+the grey band serves without any anchor lookup — while still reporting a band,
+so the response shape never varies with the flag.
+
+All of this is what makes it a *semantic* cache — "how long till my refund shows
+up" can hit a cache entry saved for "How long does it take to get my refund?"
+even though the wording differs — while giving a merely topically-related
+question a second chance to be turned away.
 
 ## Workflow (LangGraph)
 
@@ -311,8 +336,13 @@ START -> embed_question -> check_guardrail --(blocked)--> record_blocked -> END
    `is_query=True`, because that comparison is question → passage.
 2. **check_guardrail** — KNN search `idx:guardrail`. A refusal ends the request
    here: no LLM call, and `idx:cache` is never searched.
-3. **check_cache** — KNN search `idx:cache`. On a hit, set `is_cached=True`,
-   log `CACHE HIT`, and route to `record_hit`.
+3. **check_cache** — KNN search `idx:cache`, whose result is a *band* rather
+   than a yes/no (see "Cache lookup logic" above). `confident` and `verified`
+   and `unverified` all set `is_cached=True` and route to `record_hit`;
+   `rejected` — close on wording but anchored to a different FAQ — sets
+   `is_cached=False` and takes the miss path, reporting the near-miss score as
+   `rejected_similarity`. The band is data carried in state, not a new branch:
+   the graph topology is unchanged.
 4. **retrieve_context** (miss only) — KNN search `idx:kb` for the top-K
    relevant FAQs.
 5. **generate_answer** — call the LLM with the FAQ context + question.
@@ -320,12 +350,14 @@ START -> embed_question -> check_guardrail --(blocked)--> record_blocked -> END
    than on the response. A rejected answer still reaches the user; only the
    cache entry is suppressed, and `not_cached_reason` says why.
 7. **save_cache** — store the question, answer, the embedding already computed
-   in step 1, and the four metadata fields under a fresh `cache:<uuid>` key
+   in step 1, and the five metadata fields under a fresh `cache:<uuid>` key
    with a TTL. Logs `CACHE MISS / NOT CACHED`.
 8. **record_hit / record_miss / record_blocked** — terminal nodes that each
    increment one counter (`app/metrics.py`). Counting lives here rather than
    inside `check_cache` so that every path through the graph increments exactly
-   once, including a path that begins as a hit and is later rejected.
+   once, including a path that begins as a hit and is later rejected — which is
+   exactly what a grey-band rejection is. A rejection counts one miss, counts no
+   hit, and leaves the declined entry's own `hits` counter and TTL untouched.
 
 `record_miss` has two incoming edges — a written answer and a suppressed one
 are both misses — and still counts once, because only one of those paths runs
@@ -361,10 +393,21 @@ The API response always includes `is_cached: true/false` (see
                               // the user either way
   "cached_now": false,        // true only when this request's answer was
                               // freshly cached; false on a hit and on a block
-  "cached_hits": 3            // the matched entry's hit total after this
+  "cached_hits": 3,           // the matched entry's hit total after this
                               // request. Set only on a hit, and null even then
                               // for an entry written before cache documents
                               // carried a `hits` field
+  "cache_band": "verified",   // which band the lookup landed in:
+                              // confident | verified | unverified | rejected.
+                              // null on a plain miss and on a block, where no
+                              // band was ever decided. Populated regardless of
+                              // CACHE_VERIFY_GREY_BAND, so the response shape
+                              // never varies with the flag
+  "rejected_similarity": null // the near-miss score of an entry declined on an
+                              // anchor mismatch. Non-null only when
+                              // `cache_band` is "rejected" — without it a
+                              // rejection is indistinguishable from an
+                              // ordinary miss
 }
 ```
 

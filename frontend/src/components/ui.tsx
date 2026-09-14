@@ -71,13 +71,18 @@ export function Badge({
   tone = "neutral",
   children,
   className,
+  title,
 }: {
   tone?: BadgeTone;
   children: React.ReactNode;
   className?: string;
+  /** Hover text explaining a badge whose word alone needs a sentence — a cache
+   *  band, for instance. Optional: most badges say everything they mean. */
+  title?: string;
 }) {
   return (
     <span
+      title={title}
       className={cx(
         "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-medium leading-5 whitespace-nowrap",
         BADGE_TONES[tone],

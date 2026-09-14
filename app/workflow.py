@@ -18,6 +18,13 @@ LangGraph workflow:
 Every branch here is a real conditional edge, not an `if` inside a node — the
 routing decisions are the thing the graph is showing off.
 
+`check_cache` now yields a *band* rather than a yes/no: `confident`, `verified`
+and `unverified` are hits, while `rejected` — close on wording, but anchored to
+a different FAQ — takes the miss branch and reports the near miss it turned
+down. The diagram above is unchanged, deliberately: the band is data carried in
+state, and adding a node or an edge for it would claim a routing decision that
+does not exist.
+
 Each of the three outcomes ends in its own terminal recording node, so every
 path through the graph increments exactly one counter (see `app/metrics.py`).
 """
@@ -55,6 +62,12 @@ class ChatState(TypedDict, total=False):
     # That entry's hit total after this request. None for an entry written
     # before cache documents carried a `hits` field.
     cached_hits: int
+    # Which band the cache lookup landed in: confident | verified | unverified |
+    # rejected. A label, not a decision — routing still reads `is_cached` alone.
+    cache_band: str
+    # The near-miss score of an entry declined on an anchor mismatch. Set only
+    # on a rejection, and the only place that number survives the miss path.
+    rejected_similarity: float
 
 
 def embed_question_node(state: ChatState) -> dict:
@@ -83,15 +96,41 @@ def route_after_guardrail(state: ChatState) -> str:
 
 
 def check_cache_node(state: ChatState) -> dict:
-    hit = check_cache(state["question"], state["question_embedding"])
+    verdict = check_cache(state["question"], state["question_embedding"])
+    band = verdict["band"]
 
-    if hit:
-        print(f'CACHE HIT (similarity={hit["similarity"]:.3f}) for: "{state["question"]}"')
+    if verdict["hit"]:
+        # The band qualifies the hit rather than replacing it: `confident` cost
+        # one KNN, `verified` cost a second one that agreed, `unverified` means
+        # the anchor was too undecided to be asked.
+        print(
+            f'CACHE HIT ({band}, similarity={verdict["similarity"]:.3f}'
+            f'{" — anchor undecided" if band == "unverified" else ""})'
+            f' for: "{state["question"]}"'
+        )
         return {
-            "answer": hit["answer"],
+            "answer": verdict["answer"],
             "is_cached": True,
-            "cache_similarity": hit["similarity"],
-            "cache_key": hit["key"],
+            "cache_similarity": verdict["similarity"],
+            "cache_key": verdict["key"],
+            "cache_band": band,
+        }
+
+    if band == "rejected":
+        print(
+            f'CACHE REJECTED (similarity={verdict["similarity"]:.3f}, '
+            f'anchor {verdict["incoming_anchor"]} != {verdict["entry_anchor"]}) '
+            f'for: "{state["question"]}"'
+        )
+        # Deliberately no `cache_key`. record_hit_node bumps whatever key it
+        # finds in state, and a declined near-miss must never touch the hit
+        # counter of the entry it just turned down. Routing already sends this
+        # down the miss branch; leaving the key unset makes that structural
+        # rather than incidental.
+        return {
+            "is_cached": False,
+            "cache_band": "rejected",
+            "rejected_similarity": verdict["similarity"],
         }
 
     print(f'CACHE MISS / NOT CACHED for: "{state["question"]}"')
@@ -139,7 +178,28 @@ def save_cache_node(state: ChatState) -> dict:
     # context is sorted by ascending KNN distance, so [0] is the best FAQ match.
     # Free: the miss path already paid for this search.
     kb_anchor = context[0]["id"] if context else None
-    save_cache(state["question"], state["answer"], state["question_embedding"], kb_anchor)
+    # Also free: the gap to the runner-up falls out of the same KNN. It is what
+    # later tells a decisive anchor from a coin flip between two similar FAQs.
+    # Stored even though the *incoming* margin alone would decide all the
+    # measured cases, because checking only one side has a reachable failure:
+    # an entry whose own anchor was a coin flip could otherwise be confidently
+    # contradicted by a decisive incoming anchor, rejecting a true paraphrase on
+    # the strength of a number that was never meaningful. Costing nothing is
+    # what makes buying that robustness the obvious call.
+    #
+    # Fewer than two FAQs retrieved yields None — "unknown", not 0.0. A 0.0
+    # margin is a real, meaningful value (a dead tie) and conflating the two
+    # would lose information.
+    kb_anchor_margin = (
+        context[0]["similarity"] - context[1]["similarity"] if len(context) > 1 else None
+    )
+    save_cache(
+        state["question"],
+        state["answer"],
+        state["question_embedding"],
+        kb_anchor,
+        kb_anchor_margin,
+    )
     return {"cached_now": True}
 
 

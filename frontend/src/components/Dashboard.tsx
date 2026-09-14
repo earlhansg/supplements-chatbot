@@ -82,6 +82,11 @@ export function Dashboard({
         const data = (await response.json()) as ChatResponse;
         const durationMs = performance.now() - startedAt;
         const guardrail = data.guardrail ?? null;
+        const cacheBand = data.cache_band ?? null;
+        // Non-null only on a grey-band rejection, which is why it is carried
+        // separately from `cache_similarity`: that field stays null on a miss,
+        // and a rejection IS a miss.
+        const rejectedSimilarity = data.rejected_similarity ?? null;
 
         setMessages((current) => [
           ...current,
@@ -94,6 +99,8 @@ export function Dashboard({
             sources: data.sources ?? [],
             durationMs,
             guardrail,
+            cacheBand,
+            rejectedSimilarity,
           },
         ]);
 
@@ -103,13 +110,18 @@ export function Dashboard({
             question,
             // Checked before `is_cached`, because the backend reports
             // `is_cached: false` on a block as well — there it means the cache
-            // was skipped entirely, which is a third outcome, not a miss.
+            // was skipped entirely, which is a third outcome, not a miss. A
+            // grey-band rejection is NOT a fourth: it really did search the
+            // cache and really is answering from scratch, so it stays a "miss"
+            // row and carries `rejectedSimilarity` as the reason why.
             status: guardrail ? "blocked" : data.is_cached ? "hit" : "miss",
             durationMs,
             at: Date.now(),
             similarity: data.cache_similarity,
             sourceCount: data.sources?.length ?? 0,
             guardrail,
+            cacheBand,
+            rejectedSimilarity,
           },
           ...current,
         ]);
@@ -140,6 +152,10 @@ export function Dashboard({
             similarity: null,
             sourceCount: 0,
             guardrail: null,
+            // The request never produced a verdict, so there is no band and no
+            // near miss to report — not even a null-shaped "plain miss".
+            cacheBand: null,
+            rejectedSimilarity: null,
             error: message,
           },
           ...current,

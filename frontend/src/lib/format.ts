@@ -50,6 +50,27 @@ export function formatSimilarity(similarity: number): string {
 }
 
 /**
+ * A sentence explaining what a `cache_band` value means, for the badge's
+ * `title`. The badge itself already carries the word — this is the paragraph a
+ * reader needs once to learn what the word is claiming, and the reason the band
+ * needs no colour of its own.
+ */
+export function bandExplanation(band: string | null): string {
+  switch (band) {
+    case "confident":
+      return "Similarity alone was high enough to serve this answer — no verification lookup was issued.";
+    case "verified":
+      return "A borderline match, confirmed: this question and the cached one resolve to the same FAQ.";
+    case "unverified":
+      return "A borderline match, served unchecked: the KB anchor was too close a call to confirm or to veto it.";
+    case "rejected":
+      return "A borderline match, declined: it resolves to a different FAQ, so this question was answered from scratch.";
+    default:
+      return "Cosine similarity between this question and the nearest cached one.";
+  }
+}
+
+/**
  * `blocked:medical_advice` -> `Medical advice`.
  *
  * Guardrail labels are stored as `<action>:<topic>` (see `app/guardrails.py`).

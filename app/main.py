@@ -99,6 +99,8 @@ def chat(request: ChatRequest, _: None = Depends(enforce_rate_limit)):
         not_cached_reason=result.get("not_cached_reason"),
         cached_now=result.get("cached_now", False),
         cached_hits=result.get("cached_hits"),
+        cache_band=result.get("cache_band"),
+        rejected_similarity=result.get("rejected_similarity"),
     )
 
 

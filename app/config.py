@@ -25,8 +25,36 @@ class Settings(BaseSettings):
 
     redis_url: str = "redis://127.0.0.1:6379"
 
+    # The LOWER bound of the grey band, not a simple hit line any more: at or
+    # above it a match is a candidate, but between here and
+    # `cache_hit_threshold_high` it must still survive anchor verification.
     cache_similarity_threshold: float = 0.78
     cache_ttl_seconds: int = 86400
+
+    # ---- Grey-band verification (app/semantic_cache.py) ----
+    # At or above this the nearest cached question is close enough to serve
+    # untouched, and no anchor lookup is issued at all. Raise it to verify more
+    # matches (slower hits, fewer wrong answers), lower it to verify fewer.
+    # Embedding-model-dependent for the same reason as
+    # `cache_similarity_threshold` — never carry this number across a model swap.
+    cache_hit_threshold_high: float = 0.90
+    # Master switch for the grey band's anchor check. false restores the
+    # pre-verification behaviour exactly: everything at or above
+    # `cache_similarity_threshold` is served. `cache_band` stays populated
+    # either way, so the response shape never varies with the flag.
+    cache_verify_grey_band: bool = True
+    # How far the top idx:kb FAQ must beat its runner-up before the anchor is
+    # allowed to veto a match. Below this gap the top-1 choice is a coin flip
+    # between two near-duplicate FAQs, and an undecided anchor must not reject a
+    # match that already cleared the lower threshold.
+    #
+    # 0.05 is derived from 10 FAQs and 6 question pairs on this corpus — that is
+    # evidence, not calibration. It is a PLACEHOLDER pending the labelled sweep
+    # of a later phase, exactly like `guardrail_threshold`. Raise it to trust the
+    # anchor less (more matches served unverified), lower it to trust it more
+    # (more matches rejected on a narrow anchor win). Corpus- AND
+    # model-dependent: re-measure after editing data/faqs.json.
+    cache_anchor_margin_min: float = 0.05
 
     kb_retrieval_k: int = 3
 

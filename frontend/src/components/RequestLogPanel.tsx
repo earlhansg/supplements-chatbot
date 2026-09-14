@@ -13,6 +13,7 @@ import { useMemo } from "react";
 
 import { cx } from "@/lib/cx";
 import {
+  bandExplanation,
   formatClockTime,
   formatDuration,
   formatGuardrailLabel,
@@ -184,9 +185,11 @@ function LogRow({ entry }: { entry: LogEntry }) {
     <li className="px-4 py-3">
       <div className="flex items-center justify-between gap-2">
         {entry.status === "hit" ? (
-          <Badge tone="hit">
+          /* The band qualifies the hit rather than replacing it, so it reuses
+             the hit tone and says its word — no new colour for a sub-state. */
+          <Badge tone="hit" title={bandExplanation(entry.cacheBand)}>
             <BoltIcon className="size-3" />
-            Cache Hit
+            Cache Hit{entry.cacheBand ? ` · ${entry.cacheBand}` : ""}
           </Badge>
         ) : entry.status === "miss" ? (
           <Badge tone="miss">Cache Miss</Badge>
@@ -232,6 +235,16 @@ function LogRow({ entry }: { entry: LogEntry }) {
             <span className="text-zinc-800">·</span>
             <span title="Similarity to the matched cache entry">
               {formatSimilarity(entry.similarity)} match
+            </span>
+          </>
+        ) : null}
+        {entry.rejectedSimilarity !== null ? (
+          /* A rejected near-miss is still a miss row — this is the detail that
+             says it was a decision rather than an empty cache. */
+          <>
+            <span className="text-zinc-800">·</span>
+            <span className="text-amber-500/70" title={bandExplanation("rejected")}>
+              {formatSimilarity(entry.rejectedSimilarity)} match rejected — different FAQ
             </span>
           </>
         ) : null}

@@ -9,7 +9,12 @@ import { useEffect, useRef, useState } from "react";
 
 import { SUGGESTED_QUESTIONS } from "@/lib/constants";
 import { cx } from "@/lib/cx";
-import { formatDuration, formatGuardrailLabel, formatSimilarity } from "@/lib/format";
+import {
+  bandExplanation,
+  formatDuration,
+  formatGuardrailLabel,
+  formatSimilarity,
+} from "@/lib/format";
 import type { AssistantMessage, ChatMessage, ErrorMessage } from "@/lib/types";
 import {
   AlertIcon,
@@ -179,6 +184,9 @@ function AssistantBubble({ message }: { message: AssistantMessage }) {
           `check_guardrail`, so `idx:cache` is never searched — labelling that
           "Cache Miss" would claim a lookup that never happened, and would put a
           50 ms row in among the 3-second ones the miss badge stands for.
+
+          The band is a qualifier on the hit, not a fourth outcome, so it reuses
+          the hit tone and says its word instead of earning a colour of its own.
         */}
         {message.guardrail ? (
           <>
@@ -191,9 +199,9 @@ function AssistantBubble({ message }: { message: AssistantMessage }) {
             </Badge>
           </>
         ) : message.isCached ? (
-          <Badge tone="hit">
+          <Badge tone="hit" title={bandExplanation(message.cacheBand)}>
             <BoltIcon className="size-3" />
-            Cache Hit
+            Cache Hit{message.cacheBand ? ` · ${message.cacheBand}` : ""}
           </Badge>
         ) : (
           <Badge tone="miss">Cache Miss</Badge>
@@ -216,6 +224,18 @@ function AssistantBubble({ message }: { message: AssistantMessage }) {
             title="Cosine similarity between this question and the cached one"
           >
             {formatSimilarity(message.similarity)} match
+          </span>
+        ) : message.rejectedSimilarity !== null ? (
+          /*
+            The whole point of the grey band, in one line. Without it a rejected
+            near-miss is indistinguishable from a cache that simply had nothing
+            close, and the work is invisible.
+          */
+          <span
+            className="text-[11px] text-amber-500/70"
+            title="A cached answer was this close on wording, but it answers a different FAQ — so it was rejected and this question was answered from scratch."
+          >
+            {formatSimilarity(message.rejectedSimilarity)} match rejected — different FAQ
           </span>
         ) : null}
 

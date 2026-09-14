@@ -58,6 +58,22 @@ export interface ChatResponse {
    * written before cache documents carried a `hits` field.
    */
   cached_hits?: number | null;
+  /**
+   * `app/schemas.py::ChatResponse.cache_band` — which band the cache lookup
+   * landed in: `confident` (served on similarity alone), `verified` (grey band,
+   * KB anchors agreed), `unverified` (grey band, an anchor was too undecided to
+   * be asked) or `rejected` (grey band, anchors disagreed — a miss). Null on a
+   * plain miss and on a block. Populated regardless of the backend's
+   * `CACHE_VERIFY_GREY_BAND` flag, so this shape never varies with it.
+   */
+  cache_band?: string | null;
+  /**
+   * `app/schemas.py::ChatResponse.rejected_similarity` — the near-miss score of
+   * an entry declined on an anchor mismatch. Non-null only when `cache_band` is
+   * `"rejected"`; it is what lets the UI say "88.3% match rejected" rather than
+   * rendering an ordinary miss.
+   */
+  rejected_similarity?: number | null;
 }
 
 /** `app/schemas.py::DailyStats` — counters for the current UTC day. */
@@ -142,6 +158,14 @@ export interface AssistantMessage {
    * the UI must render those two as different states.
    */
   guardrail: GuardrailInfo | null;
+  /** Which band the lookup landed in. Null on a plain miss and on a block. */
+  cacheBand: string | null;
+  /**
+   * Non-null only on a rejected grey-band match: the score of the entry that
+   * was close enough on cosine but anchored to a different FAQ. `isCached` is
+   * false here, as on any miss — this is the extra detail that says why.
+   */
+  rejectedSimilarity: number | null;
 }
 
 export interface ErrorMessage {
@@ -173,5 +197,9 @@ export interface LogEntry {
   sourceCount: number;
   /** The refusing exemplar, on a `blocked` row only. Carries its own similarity. */
   guardrail: GuardrailInfo | null;
+  /** Which band the lookup landed in. Null on a plain miss, a block and an error. */
+  cacheBand: string | null;
+  /** The declined entry's score, on a `miss` row that was a grey-band rejection. */
+  rejectedSimilarity: number | null;
   error?: string;
 }
