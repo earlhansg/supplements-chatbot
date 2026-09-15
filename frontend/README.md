@@ -5,10 +5,12 @@ directory. Built to make the **semantic cache** visible: ask a question, watch i
 get cached, then ask a paraphrase of it and watch the answer come back instantly
 as a cache hit.
 
-![Three-panel UI showing a cache miss at 3.75s followed by a cache hit at 35ms](../docs/screenshots/desktop.png)
+![Three-panel UI showing a cache miss at 2.97s followed by a cache hit at 94ms](../docs/screenshots/desktop.png)
 
-A real session: "How can I track my order?" misses and takes 3.75 s, then the
-reworded "How do I track my package?" matches it at 88.3% and returns in 35 ms.
+A real session: "What is your refund policy?" misses and takes 2.97 s, then the
+reworded "How do refunds work?" matches it at 87.3% and returns in 94 ms —
+labelled `unverified`, because that grey-band match had no decisive KB anchor to
+check it against.
 
 <details>
 <summary>First load, before anything is asked</summary>

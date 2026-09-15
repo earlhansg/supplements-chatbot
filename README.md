@@ -10,9 +10,13 @@ visible while you use it.
 
 ![The three-panel UI: cached knowledge, chat, and a live request log](docs/screenshots/desktop.png)
 
-*A real session. The first question misses the cache and takes **3.75 s** (KB
-retrieval + LLM). The reworded follow-up — "order" became "package" — matches the
-cached entry at **88.3%** similarity and returns in **35 ms**.*
+*A real session. The first question misses the cache and takes **2.97 s** (KB
+retrieval + LLM), and its answer is written back. The reworded follow-up — "What
+is your refund policy?" became "How do refunds work?" — matches that new entry at
+**87.3%** similarity and returns in **94 ms**. The match lands in the grey band,
+so it is labelled `unverified`: its KB anchor was too close to call and, by the
+rule in [What that verification actually bought](#what-that-verification-actually-bought),
+an undecided anchor may not veto a match.*
 
 ## What this project demonstrates
 
@@ -150,13 +154,15 @@ Measured on this machine, local LLM backend, from the request log above:
 
 | | Response time | LLM call | KB lookup |
 |---|---|---|---|
-| Cache miss | **3.75 s** | yes | yes (KNN 3) |
-| Cache hit | **35 ms** | no | no |
+| Cache miss | **2.97 s** | yes | yes (KNN 3) |
+| Cache hit | **94 ms** | no | no |
 
-Roughly **100× faster**, and every hit is a generation request that never
-happened. On a real support bot — where a long tail of customers ask the same
-dozen questions in different words — that is the difference between paying per
-answer and paying per *distinct* answer.
+Roughly **32× faster**, and every hit is a generation request that never
+happened. Both figures are timed in the browser, so the hit includes the Next.js
+proxy hop; against FastAPI directly the same hit is ~73 ms, nearly all of it
+spent embedding the question. On a real support bot — where a long tail of
+customers ask the same dozen questions in different words — that is the
+difference between paying per answer and paying per *distinct* answer.
 
 ### The threshold is a real tradeoff
 
