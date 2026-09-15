@@ -111,3 +111,52 @@ def retrieve_context(query: str, k: int | None = None) -> list[dict]:
         }
         for doc in results.docs
     ]
+
+
+def anchor_for(question: str) -> dict | None:
+    """Resolve the FAQ a question anchors to, and how decisively.
+
+    Returns {"id", "similarity", "margin"}, or None when the KB is empty.
+    `margin` is the gap to the runner-up: a small gap means the top FAQ barely
+    won and the anchor should not be trusted to veto anything.
+
+    Takes the raw question rather than a vector, deliberately. This is a
+    question -> passage comparison against passages indexed WITHOUT the bge
+    prefix, so it must do its own `is_query=True` encode; accepting a vector
+    would let a caller hand in the workflow's symmetric one, which would
+    compile, run, return plausible ids, and silently degrade every anchor
+    decision.
+    """
+    query_vector = generate_embedding(question, is_query=True)
+
+    # KNN 2, not 1: the runner-up is the whole point — one score alone says
+    # nothing about whether the winner actually won.
+    search_query = (
+        Query("*=>[KNN 2 @embedding $vec AS score]")
+        .sort_by("score")
+        .return_fields("score")  # the id arrives on doc.id; no FAQ text needed
+        .paging(0, 2)
+        .dialect(2)
+    )
+
+    results = redis_client.ft(KB_INDEX).search(
+        search_query, query_params={"vec": floats_to_bytes(query_vector)}
+    )
+
+    if not results.docs:
+        return None
+
+    top = results.docs[0]
+    similarity = 1 - float(top.score)
+    # A single-document KB has no runner-up, so there is nothing the top FAQ
+    # could be confused with: a margin of 1.0 says "maximally decisive" rather
+    # than raising on a degenerate but legal corpus.
+    margin = (
+        similarity - (1 - float(results.docs[1].score)) if len(results.docs) > 1 else 1.0
+    )
+
+    return {
+        "id": top.id.replace(KB_PREFIX, "", 1),
+        "similarity": similarity,
+        "margin": margin,
+    }

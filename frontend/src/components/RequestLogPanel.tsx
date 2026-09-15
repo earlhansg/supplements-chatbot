@@ -12,9 +12,15 @@
 import { useMemo } from "react";
 
 import { cx } from "@/lib/cx";
-import { formatClockTime, formatDuration, formatSimilarity } from "@/lib/format";
+import {
+  bandExplanation,
+  formatClockTime,
+  formatDuration,
+  formatGuardrailLabel,
+  formatSimilarity,
+} from "@/lib/format";
 import type { LogEntry } from "@/lib/types";
-import { ActivityIcon, BoltIcon, TrashIcon } from "@/components/icons";
+import { ActivityIcon, BoltIcon, ShieldIcon, TrashIcon } from "@/components/icons";
 import { Badge, EmptyState, IconButton, PanelBody, PanelHeader } from "@/components/ui";
 
 export function RequestLogPanel({
@@ -73,15 +79,25 @@ export function RequestLogPanel({
 interface Stats {
   hits: number;
   misses: number;
+  blocked: number;
   avgHitMs: number | null;
   avgMissMs: number | null;
 }
 
-/** The headline comparison: how much faster a hit is than a miss. */
+/**
+ * The headline comparison: how much faster a hit is than a miss.
+ *
+ * Guardrail blocks are counted but deliberately kept out of both averages. A
+ * block never reaches the cache or the LLM, so it lands in the tens of
+ * milliseconds; folding those into the miss average would drag it toward the
+ * hit average and understate the speedup this panel exists to show. They are
+ * still reported below the tiles so the numbers add up to the request count.
+ */
 function summarise(entries: LogEntry[]): Stats | null {
   const hits = entries.filter((entry) => entry.status === "hit");
   const misses = entries.filter((entry) => entry.status === "miss");
-  if (hits.length === 0 && misses.length === 0) return null;
+  const blocked = entries.filter((entry) => entry.status === "blocked");
+  if (hits.length === 0 && misses.length === 0 && blocked.length === 0) return null;
 
   const mean = (rows: LogEntry[]) =>
     rows.length === 0
@@ -91,6 +107,7 @@ function summarise(entries: LogEntry[]): Stats | null {
   return {
     hits: hits.length,
     misses: misses.length,
+    blocked: blocked.length,
     avgHitMs: mean(hits),
     avgMissMs: mean(misses),
   };
@@ -121,6 +138,12 @@ function StatsStrip({ stats }: { stats: Stats }) {
           Cache hits are{" "}
           <span className="font-semibold text-emerald-400">{speedup.toFixed(0)}×</span> faster on
           average
+        </p>
+      ) : null}
+      {stats.blocked > 0 ? (
+        <p className="mt-2 text-center text-[11px] text-zinc-600">
+          <span className="font-semibold text-violet-400">{stats.blocked}</span> blocked by the
+          guardrail · never reached the cache, so excluded from both averages
         </p>
       ) : null}
     </div>
@@ -162,12 +185,19 @@ function LogRow({ entry }: { entry: LogEntry }) {
     <li className="px-4 py-3">
       <div className="flex items-center justify-between gap-2">
         {entry.status === "hit" ? (
-          <Badge tone="hit">
+          /* The band qualifies the hit rather than replacing it, so it reuses
+             the hit tone and says its word — no new colour for a sub-state. */
+          <Badge tone="hit" title={bandExplanation(entry.cacheBand)}>
             <BoltIcon className="size-3" />
-            Cache Hit
+            Cache Hit{entry.cacheBand ? ` · ${entry.cacheBand}` : ""}
           </Badge>
         ) : entry.status === "miss" ? (
           <Badge tone="miss">Cache Miss</Badge>
+        ) : entry.status === "blocked" ? (
+          <Badge tone="blocked">
+            <ShieldIcon className="size-3" />
+            Guardrail
+          </Badge>
         ) : (
           <Badge tone="error">Error</Badge>
         )}
@@ -179,7 +209,9 @@ function LogRow({ entry }: { entry: LogEntry }) {
               ? "text-emerald-300"
               : entry.status === "miss"
                 ? "text-amber-300"
-                : "text-rose-300",
+                : entry.status === "blocked"
+                  ? "text-violet-300"
+                  : "text-rose-300",
           )}
         >
           {formatDuration(entry.durationMs)}
@@ -206,6 +238,16 @@ function LogRow({ entry }: { entry: LogEntry }) {
             </span>
           </>
         ) : null}
+        {entry.rejectedSimilarity !== null ? (
+          /* A rejected near-miss is still a miss row — this is the detail that
+             says it was a decision rather than an empty cache. */
+          <>
+            <span className="text-zinc-800">·</span>
+            <span className="text-amber-500/70" title={bandExplanation("rejected")}>
+              {formatSimilarity(entry.rejectedSimilarity)} match rejected — different FAQ
+            </span>
+          </>
+        ) : null}
         {entry.status === "miss" ? (
           <>
             <span className="text-zinc-800">·</span>
@@ -214,6 +256,17 @@ function LogRow({ entry }: { entry: LogEntry }) {
             </span>
             <span className="text-zinc-800">·</span>
             <span className="text-zinc-600">answer cached</span>
+          </>
+        ) : null}
+        {entry.guardrail ? (
+          <>
+            <span className="text-zinc-800">·</span>
+            <span title="The nearest guardrail exemplar, and how close this question sat to it">
+              {formatGuardrailLabel(entry.guardrail.label)}{" "}
+              {formatSimilarity(entry.guardrail.similarity)}
+            </span>
+            <span className="text-zinc-800">·</span>
+            <span className="text-zinc-600">cache skipped</span>
           </>
         ) : null}
       </div>

@@ -58,7 +58,6 @@ reaches the client bundle.
 | ---------------------------- | ------------------------ | ---------------------------------------------------- |
 | `BACKEND_URL`                | `http://127.0.0.1:8000`  | uvicorn host running `app.main:app`                  |
 | `REDIS_URL`                  | `redis://127.0.0.1:6379` | Same Redis the backend uses; read-only from here     |
-| `CACHE_TTL_SECONDS`          | `86400`                  | Must match the backend — used to derive entry age    |
 | `CACHE_SIMILARITY_THRESHOLD` | `0.78`                   | Display only; shown as the hit threshold             |
 | `CACHE_LIST_LIMIT`           | `100`                    | Max entries listed in the left panel                 |
 | `CHAT_TIMEOUT_MS`            | `150000`                 | Ceiling for one `/chat` call                         |
@@ -85,21 +84,63 @@ From `app/schemas.py`:
 
 {
   "answer": "Standard shipping typically takes 3-5 business days…",
-  "is_cached": true,          // drives the Hit/Miss badge — nothing is inferred
-  "cache_similarity": 0.94,   // non-null only on a hit
-  "sources": []               // populated only on a miss (KB retrieval is skipped on a hit)
+  "is_cached": true,            // drives the Hit/Miss badge — nothing is inferred
+  "cache_similarity": 0.94,     // non-null only on a hit
+  "sources": [],                // populated only on a miss (KB retrieval is skipped on a hit)
+  "guardrail": null,            // non-null only when the input guardrail refused
+  "not_cached_reason": null,    // why the answer was not written to the cache, on a
+                                // miss the output guardrail rejected: generation_failed
+                                // | too_short | refusal | ungrounded. The answer still
+                                // reached the user either way.
+  "cached_now": false,          // true only when this request wrote a cache entry
+  "cached_hits": 3,             // the matched entry's hit total after this request.
+                                // Non-null only on a hit, and null even then for an
+                                // entry written before cache documents carried `hits`.
+  "cache_band": "confident",    // confident (served on similarity alone) | verified
+                                // (grey band, KB anchors agreed) | unverified (grey
+                                // band, an anchor was too undecided to be asked) |
+                                // rejected (grey band, anchors disagreed — a miss).
+                                // null on a plain miss and on a block.
+  "rejected_similarity": null   // the near-miss score of an entry declined on an
+                                // anchor mismatch. Non-null only when `cache_band`
+                                // is "rejected".
 }
 ```
 
-Two consequences worth knowing:
+Five consequences worth knowing:
+
+- **The badge has three states, not two.** `guardrail` is checked before
+  `is_cached`, because a refused question ends the LangGraph run at
+  `check_guardrail` and `idx:cache` is never searched. The backend still reports
+  `is_cached: false` there, but it means *skipped*, not *missed* — so those
+  render as `Guardrail: <topic>` + `Cache Skipped`, and the request log keeps
+  them out of the hit/miss averages that the "N× faster" figure is built from.
+
+- **A `rejected` match renders as a miss, but with a score.** A grey-band match
+  whose KB anchor disagreed with the cached entry's is declined, so `is_cached`
+  is `false` and the request takes the full miss path — but `rejected_similarity`
+  carries the near-miss score that ordinary misses have no equivalent of. That is
+  the reason the UI model keeps `cacheBand` and `rejectedSimilarity` as separate
+  fields: without them a *"0.809, but about a different FAQ"* is indistinguishable
+  from *"nothing was close"*, and the most interesting thing the cache did that
+  request would be invisible.
 
 - **Response time is measured client-side.** The backend returns no timing
   field, so the clock starts before the `fetch` and stops when the body is
   parsed. That total includes the proxy hop, which is sub-millisecond locally.
-- **Cache entries have no timestamp.** A `cache:<uuid>` document is
-  `{query, answer, embedding}` and nothing else, so "cached 3h ago" is derived
-  from the key's remaining TTL against `CACHE_TTL_SECONDS`. It is approximate by
-  construction, and shows as "no expiry" if a key somehow lost its TTL.
+- **Cache entries carry their own `created_at`.** A `cache:<uuid>` document
+  also stores `hits`, `kb_anchor`, `kb_anchor_margin` and `model` alongside the
+  question, answer and
+  embedding, so "cached 3h ago" is a real age rather than an inference from the
+  remaining TTL — and the two `.env` files no longer have to agree on
+  `CACHE_TTL_SECONDS`. None of those fields are in the index schema; RediSearch
+  returns them via the explicit `RETURN $.path AS alias` form. A document
+  written before those fields existed renders as "age unknown" with no hit
+  chip, and ages out within the backend's TTL.
+- **The header's hit rate comes from `GET /stats`**, fetched by the same 4s poll
+  as the entry list. It is fetched with `Promise.allSettled`, so a backend that
+  is down hides the hit rate without blanking the rows — Redis alone is enough
+  to keep the panel useful.
 
 ## Architecture notes
 
@@ -112,9 +153,9 @@ hidden.
 
 **One request feeds two panels.** `Dashboard.tsx` owns `sendQuestion`, so a
 single `/api/chat` call appends both the chat message and the request-log row
-with the same measured duration. A miss also triggers an immediate cache
-refresh rather than waiting out the poll interval, so the new entry appears in
-the left panel right away.
+with the same measured duration. A request that actually wrote an entry
+(`cached_now`) also triggers an immediate cache refresh rather than waiting out
+the poll interval, so the new entry appears in the left panel right away.
 
 **The request log is session state and nothing more.** No polling, no backend
 log endpoint, no persistence — plain React state, gone on refresh, as intended.

@@ -8,7 +8,7 @@
  */
 
 import { serverConfig } from "@/lib/server-config";
-import type { ChatResponse } from "@/lib/types";
+import type { ChatResponse, StatsResponse } from "@/lib/types";
 
 export class BackendError extends Error {
   readonly status: number;
@@ -72,6 +72,36 @@ export async function askBackend(question: string): Promise<ChatResponse> {
   }
 
   return (await response.json()) as ChatResponse;
+}
+
+/**
+ * GET `/stats` on the FastAPI app (`app/main.py`).
+ *
+ * A short timeout, matching `pingBackend`: /stats is a handful of Redis reads
+ * and a count, so it has no reason to be slow, and the cache panel would rather
+ * hide the hit rate than wait on it.
+ */
+export async function fetchStats(): Promise<StatsResponse> {
+  let response: Response;
+
+  try {
+    response = await fetch(`${serverConfig.backendUrl}/stats`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(3_000),
+    });
+  } catch {
+    throw new BackendError(
+      `Cannot reach the chatbot backend at ${serverConfig.backendUrl}. ` +
+        "Is `uvicorn app.main:app` running?",
+      502,
+    );
+  }
+
+  if (!response.ok) {
+    throw new BackendError(await describeFailure(response), response.status);
+  }
+
+  return (await response.json()) as StatsResponse;
 }
 
 /** GET `/health` on the FastAPI app (`app/main.py:34`). */

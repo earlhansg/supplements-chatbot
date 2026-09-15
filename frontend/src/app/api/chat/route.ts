@@ -7,6 +7,7 @@
  */
 
 import { askBackend, BackendError } from "@/lib/backend";
+import { serverConfig } from "@/lib/server-config";
 import type { ApiError } from "@/lib/types";
 
 // A cache miss runs KB retrieval plus a local LLM call; give it room.
@@ -30,6 +31,16 @@ export async function POST(request: Request): Promise<Response> {
   // fails here instead of coming back as a 422.
   if (!question) {
     return errorResponse("`question` is required and must be a non-empty string.", 400);
+  }
+
+  // Same idea for the backend's `max_length=MAX_QUESTION_CHARS`: catch it at
+  // the boundary so the user gets an actionable 400 instead of a 422.
+  if (question.length > serverConfig.maxQuestionChars) {
+    return errorResponse(
+      `\`question\` must be ${serverConfig.maxQuestionChars} characters or fewer ` +
+        `(received ${question.length}).`,
+      400,
+    );
   }
 
   try {

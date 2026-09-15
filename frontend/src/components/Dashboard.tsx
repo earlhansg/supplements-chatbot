@@ -81,6 +81,12 @@ export function Dashboard({
 
         const data = (await response.json()) as ChatResponse;
         const durationMs = performance.now() - startedAt;
+        const guardrail = data.guardrail ?? null;
+        const cacheBand = data.cache_band ?? null;
+        // Non-null only on a grey-band rejection, which is why it is carried
+        // separately from `cache_similarity`: that field stays null on a miss,
+        // and a rejection IS a miss.
+        const rejectedSimilarity = data.rejected_similarity ?? null;
 
         setMessages((current) => [
           ...current,
@@ -92,6 +98,9 @@ export function Dashboard({
             similarity: data.cache_similarity,
             sources: data.sources ?? [],
             durationMs,
+            guardrail,
+            cacheBand,
+            rejectedSimilarity,
           },
         ]);
 
@@ -99,17 +108,30 @@ export function Dashboard({
           {
             id: newId(),
             question,
-            status: data.is_cached ? "hit" : "miss",
+            // Checked before `is_cached`, because the backend reports
+            // `is_cached: false` on a block as well — there it means the cache
+            // was skipped entirely, which is a third outcome, not a miss. A
+            // grey-band rejection is NOT a fourth: it really did search the
+            // cache and really is answering from scratch, so it stays a "miss"
+            // row and carries `rejectedSimilarity` as the reason why.
+            status: guardrail ? "blocked" : data.is_cached ? "hit" : "miss",
             durationMs,
             at: Date.now(),
             similarity: data.cache_similarity,
             sourceCount: data.sources?.length ?? 0,
+            guardrail,
+            cacheBand,
+            rejectedSimilarity,
           },
           ...current,
         ]);
 
-        // A miss just wrote a new `cache:<uuid>` document — show it immediately.
-        if (!data.is_cached) refreshCache();
+        // `cached_now` rather than `!is_cached`: only a request that actually
+        // wrote a `cache:<uuid>` document has anything new for the left panel.
+        // A block writes nothing, and so does a miss the output guardrail
+        // rejected — refreshing for those would poll for an entry that isn't
+        // coming.
+        if (data.cached_now) refreshCache();
       } catch (caught) {
         const durationMs = performance.now() - startedAt;
         const message =
@@ -129,6 +151,11 @@ export function Dashboard({
             at: Date.now(),
             similarity: null,
             sourceCount: 0,
+            guardrail: null,
+            // The request never produced a verdict, so there is no band and no
+            // near miss to report — not even a null-shaped "plain miss".
+            cacheBand: null,
+            rejectedSimilarity: null,
             error: message,
           },
           ...current,

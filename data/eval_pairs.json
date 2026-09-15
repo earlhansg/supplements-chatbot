@@ -1,0 +1,140 @@
+[
+  {
+    "a": "What is your refund policy?",
+    "b": "What is your refund policy?",
+    "should_hit": true,
+    "note": "LABELLING RULE for this whole file: should_hit is true iff the cached answer for `a` FULLY ANSWERS `b` — not 'are these similar?'. Similarity is what the embedding already reports; labelling it would make the sweep circular. This first row is the exact repeat: same string, ~1.0, the confident band."
+  },
+  {
+    "a": "How can I track my order?",
+    "b": "How do I track my package?",
+    "should_hit": true,
+    "note": "Phase 3 measured 0.883 -> verified. A plain rewording of faq-007."
+  },
+  {
+    "a": "What is your refund policy?",
+    "b": "How do refunds work?",
+    "should_hit": true,
+    "note": "Phase 3 measured 0.873 -> unverified (both refunds FAQs are near-duplicates, anchor margins 0.021 / 0.032). Also the first starter pair in frontend/src/lib/constants.ts."
+  },
+  {
+    "a": "How long does shipping take?",
+    "b": "How many days until my order arrives?",
+    "should_hit": true,
+    "note": "Phase 3 measured 0.817 -> unverified (shipping anchor beat its runner-up by 0.001). The second starter pair in frontend/src/lib/constants.ts."
+  },
+  {
+    "a": "How long does shipping take?",
+    "b": "How much does shipping cost?",
+    "should_hit": false,
+    "note": "THE README'S DOCUMENTED FALSE HIT. Phase 3 measured 0.809 -> rejected. faq-006 answers delivery time; faq-005 answers price. Same topic, different answer — the single row this whole phase exists to keep honest."
+  },
+  {
+    "a": "What is your refund policy?",
+    "b": "Can I get my money back on an unopened tub?",
+    "should_hit": true,
+    "note": "Phase 3 measured 0.673 -> miss. Labelled true anyway: faq-001's answer opens with the 30-day guarantee on unopened supplements, so it does fully answer this. A deliberate false negative that costs recall at every threshold in the sweep."
+  },
+  {
+    "a": "Can I cancel or change my order after placing it?",
+    "b": "How do I cancel an order I just placed?",
+    "should_hit": true,
+    "note": "The README's 0.947 row. A near-verbatim rewording of faq-009."
+  },
+  {
+    "a": "How much does shipping cost?",
+    "b": "What are your shipping fees?",
+    "should_hit": true,
+    "note": "Rewording of faq-005. The mirror image of the 0.809 row: same shipping topic, but here the answer really does transfer."
+  },
+  {
+    "a": "My order arrived damaged, can I get a replacement?",
+    "b": "My package showed up broken, can you send me another one?",
+    "should_hit": true,
+    "note": "replacements category. Colloquial rewording of faq-003, so recall is not measured only on refunds and shipping."
+  },
+  {
+    "a": "I received the wrong product in my order, what should I do?",
+    "b": "You sent me the wrong item, how do I fix this?",
+    "should_hit": true,
+    "note": "replacements category. Rewording of faq-004."
+  },
+  {
+    "a": "Are your supplements third-party tested for quality and safety?",
+    "b": "Do you have third-party lab testing on your products?",
+    "should_hit": true,
+    "note": "products category. Rewording of faq-010."
+  },
+  {
+    "a": "Are your supplements third-party tested for quality and safety?",
+    "b": "Can I see a Certificate of Analysis for my product?",
+    "should_hit": true,
+    "note": "A hard positive: different wording entirely, but faq-010's answer explicitly covers how to request a COA, so the cached answer does fully answer it. Expected to score low — that is the point."
+  },
+  {
+    "a": "My tracking number isn't updating, what should I do?",
+    "b": "My tracking hasn't moved in three days, what now?",
+    "should_hit": true,
+    "note": "order_tracking category. Rewording of faq-008, and deliberately close in wording to faq-007's paraphrase above."
+  },
+  {
+    "a": "How long does it take to get my refund?",
+    "b": "When will my refund show up on my card?",
+    "should_hit": true,
+    "note": "refunds category. Rewording of faq-002, whose answer covers the 2-7 business days back to the original payment method."
+  },
+  {
+    "a": "What is your refund policy?",
+    "b": "How long does it take to get my refund?",
+    "should_hit": false,
+    "note": "Topical neighbour: faq-001 vs faq-002. Both are refunds, and the policy answer says nothing about processing time. The pair whose anchors are least decisive on this corpus — margins 0.021 / 0.032 — so the margin guard should refuse to veto it."
+  },
+  {
+    "a": "My order arrived damaged, can I get a replacement?",
+    "b": "I received the wrong product in my order, what should I do?",
+    "should_hit": false,
+    "note": "Topical neighbour: faq-003 vs faq-004. Damaged ships a free replacement with no return; wrong item needs a prepaid return label. Same category, materially different instructions."
+  },
+  {
+    "a": "How can I track my order?",
+    "b": "My tracking number isn't updating, what should I do?",
+    "should_hit": false,
+    "note": "Topical neighbour: faq-007 vs faq-008. 'Here is where your tracking link is' does not answer 'my tracking link is stuck'."
+  },
+  {
+    "a": "Can I cancel or change my order after placing it?",
+    "b": "How do I return an item I already received?",
+    "should_hit": false,
+    "note": "Neighbouring intents that share the word 'order': cancelling before fulfilment is a different process from returning after delivery."
+  },
+  {
+    "a": "How much does shipping cost?",
+    "b": "Do you ship internationally?",
+    "should_hit": false,
+    "note": "Topical neighbour inside shipping: faq-005 answers price only and never says where the store ships. Coverage lives in faq-006's answer instead."
+  },
+  {
+    "a": "How long does shipping take?",
+    "b": "Are your supplements third-party tested for quality and safety?",
+    "should_hit": false,
+    "note": "Unrelated pair — a true negative, to keep the false-hit-rate denominator honest."
+  },
+  {
+    "a": "What is your refund policy?",
+    "b": "How can I track my order?",
+    "should_hit": false,
+    "note": "Unrelated pair."
+  },
+  {
+    "a": "Are your supplements third-party tested for quality and safety?",
+    "b": "How much does shipping cost?",
+    "should_hit": false,
+    "note": "Unrelated pair."
+  },
+  {
+    "a": "My order arrived damaged, can I get a replacement?",
+    "b": "How long does shipping take?",
+    "should_hit": false,
+    "note": "Unrelated pair."
+  }
+]

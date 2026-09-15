@@ -1,0 +1,14 @@
+# Dev-only. Kept separate so the runtime install stays exactly what the app
+# needs — this file adds ONE dependency to the project, and that is the point.
+-r requirements.txt
+
+# The test suite's only addition. Two other libraries the suite leans on are
+# deliberately absent because they are already installed transitively:
+#   httpx  — needed by fastapi.testclient.TestClient, pulled in by `openai`
+#   numpy  — needed by scripts/eval_threshold.py, pulled in by
+#            `sentence-transformers`
+# Relying on a transitive dependency is a real (if small) risk: an upstream
+# release that drops either one breaks the suite with a confusing ImportError.
+# One line of documentation is cheaper than pinning them and claiming they are
+# ours.
+pytest>=8.0

@@ -8,8 +8,13 @@
  *
  * Index/document layout (see `app/semantic_cache.py`):
  *   key    cache:<uuid>            RedisJSON, EXPIRE'd to CACHE_TTL_SECONDS
- *   doc    { query, answer, embedding: number[768] }
+ *   doc    { query, answer, embedding: number[768],
+ *            created_at, hits, kb_anchor, model }
  *   index  idx:cache  ON JSON  PREFIX cache:  with aliases query/answer/embedding
+ *
+ * The four metadata fields are not in the index schema. RediSearch returns an
+ * unindexed JSON path given the explicit `$.path AS alias` form, which is how
+ * `created_at` and `hits` reach this file without an `FT.ALTER`.
  */
 
 import { createClient, type RedisClientType } from "redis";
@@ -64,22 +69,31 @@ function isMissingIndex(error: unknown): boolean {
 }
 
 /**
- * Cache documents have no `created_at`, so age is inferred from how much of the
- * TTL window is left. `TTL` returns -1 for a key with no expiry and -2 if it
- * vanished between the search and this call; both yield a `null` age rather than
- * a made-up number.
+ * Age from the document's own `created_at`, replacing the TTL-derived
+ * approximation this file used before cache documents carried a timestamp.
+ * Null for an entry written before that field existed; those age out within
+ * CACHE_TTL_SECONDS and the panel renders them as "age unknown".
+ *
+ * `Math.max(0, ...)` so clock skew between the backend and this process reads
+ * as "just now" rather than as a negative age.
  */
-function ageFromTtl(ttl: number): { ttlSeconds: number | null; ageSeconds: number | null } {
-  if (ttl < 0) return { ttlSeconds: null, ageSeconds: null };
-  const age = serverConfig.cacheTtlSeconds - ttl;
-  return { ttlSeconds: ttl, ageSeconds: age >= 0 ? age : null };
+function ageFromCreatedAt(createdAt: number | null): number | null {
+  if (createdAt === null) return null;
+  return Math.max(0, Math.floor(Date.now() / 1000) - createdAt);
+}
+
+/** Every value FT.SEARCH returns is a string, numbers included — `hits` arrives as `"7"`. */
+function numericField(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 /**
  * List cached Q&A pairs, newest first.
  *
- * `RETURN` is restricted to query/answer on purpose: without it every document
- * would drag its 768-float embedding across the wire.
+ * `RETURN` is restricted on purpose: without it every document would drag its
+ * 768-float embedding across the wire.
  */
 export async function listCachedEntries(
   limit: number = serverConfig.cacheListLimit,
@@ -97,7 +111,18 @@ export async function listCachedEntries(
   let reply;
   try {
     reply = await client.ft.search(CACHE_INDEX, "*", {
-      RETURN: ["query", "answer"],
+      RETURN: [
+        "query",
+        "answer",
+        // Unindexed JSON paths need the explicit `$.path AS alias` form — a
+        // bare alias only resolves for fields that are in the index schema.
+        "$.hits",
+        "AS",
+        "hits",
+        "$.created_at",
+        "AS",
+        "created_at",
+      ],
       LIMIT: { from: 0, size: limit },
       DIALECT: 2,
     });
@@ -118,17 +143,32 @@ export async function listCachedEntries(
   const ttls = await Promise.all(reply.documents.map((doc) => client.ttl(doc.id)));
 
   const entries: CacheEntry[] = reply.documents.map((doc, index) => {
-    const value = doc.value as { query?: unknown; answer?: unknown };
+    const value = doc.value as {
+      query?: unknown;
+      answer?: unknown;
+      hits?: unknown;
+      created_at?: unknown;
+    };
+    const createdAt = numericField(value.created_at);
+    // `TTL` returns -1 for a key with no expiry and -2 if it vanished between
+    // the search and this call; both become a null countdown rather than a
+    // made-up number.
+    const ttl = ttls[index] ?? -1;
+
     return {
       key: doc.id,
       query: typeof value.query === "string" ? value.query : "(missing query)",
       answer: typeof value.answer === "string" ? value.answer : "(missing answer)",
-      ...ageFromTtl(ttls[index] ?? -1),
+      ttlSeconds: ttl < 0 ? null : ttl,
+      ageSeconds: ageFromCreatedAt(createdAt),
+      hits: numericField(value.hits),
+      createdAt,
     };
   });
 
-  // Most TTL left == most recently written. Entries without a TTL sort last.
-  entries.sort((a, b) => (b.ttlSeconds ?? -1) - (a.ttlSeconds ?? -1));
+  // Newest first, by the document's own timestamp. Entries without one predate
+  // the metadata fields and sort last.
+  entries.sort((a, b) => (b.createdAt ?? -1) - (a.createdAt ?? -1));
 
   return { entries, total: reply.total };
 }

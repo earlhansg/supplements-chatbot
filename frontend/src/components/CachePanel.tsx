@@ -11,7 +11,7 @@
 import { useState } from "react";
 
 import { cx } from "@/lib/cx";
-import { formatAge, formatCountdown, shortKey } from "@/lib/format";
+import { formatAge, formatCountdown, formatPercent, shortKey } from "@/lib/format";
 import type { CacheFeed } from "@/lib/use-cache-entries";
 import type { CacheEntry } from "@/lib/types";
 import { DatabaseIcon, RefreshIcon, SearchIcon } from "@/components/icons";
@@ -54,13 +54,35 @@ export function CachePanel({ feed, threshold }: { feed: CacheFeed; threshold: nu
             <span title="Cosine similarity a question must beat to count as a hit">
               hit ≥ {threshold}
             </span>
+            {/* Hidden rather than zeroed when /api/stats is unreachable: a hit
+                rate of 0% and an unknown hit rate are different claims. */}
+            {feed.stats ? (
+              <>
+                <span className="text-zinc-700">·</span>
+                <span title="Share of answered questions served from the cache">
+                  {formatPercent(feed.stats.hit_rate)} hit rate
+                </span>
+              </>
+            ) : null}
           </span>
         }
         actions={
           <>
-            {feed.isRefreshing ? <Spinner className="size-3.5 text-zinc-600" /> : null}
-            <IconButton label="Refresh cache list" onClick={feed.refresh} disabled={feed.isRefreshing}>
-              <RefreshIcon className="size-4" />
+            {/* The spinner replaces the refresh glyph inside the button rather
+                than sitting beside it. Both icons are size-4, so the button's
+                box never changes and this shrink-0 column never squeezes the
+                subtitle — which, at panel widths near the wrap point, is what
+                made the header appear to bounce on every poll.
+
+                Not disabled while refreshing either: `load()` already returns
+                early on an overlapping call, so `disabled` only added a flash
+                to 40% opacity. */}
+            <IconButton label="Refresh cache list" onClick={feed.refresh}>
+              {feed.isRefreshing ? (
+                <Spinner className="size-4" />
+              ) : (
+                <RefreshIcon className="size-4" />
+              )}
             </IconButton>
           </>
         }
@@ -161,6 +183,14 @@ function CacheRow({
         <div className="mt-2 flex items-center gap-2">
           <KeyChip>{shortKey(entry.key)}</KeyChip>
           <span className="text-[11px] text-zinc-600">{formatAge(entry.ageSeconds)}</span>
+          {/* Only for an entry that has actually been reused. A never-hit entry
+              and a legacy one with no counter both render nothing, which is the
+              right amount of explanation for a row. */}
+          {entry.hits !== null && entry.hits > 0 ? (
+            <Badge tone="hit">
+              {entry.hits} {entry.hits === 1 ? "hit" : "hits"}
+            </Badge>
+          ) : null}
           {expanded ? null : (
             <span className="ml-auto text-[11px] text-zinc-700">click to expand</span>
           )}
