@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     # LOCAL_LLM_BASE_URL) or "openai" (app/llm.py, the hosted API). Any other
     # value raises at import rather than falling back. Run GET /v1/models on a
     # local server to see which model ids it accepts.
-    llm_backend: str = "local"
+    llm_backend: str = "openai"
 
     # Local OpenAI-compatible server (used by app/llm_local.py). The server
     # ignores credentials, so the key is a placeholder.
