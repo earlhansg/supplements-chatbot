@@ -11,8 +11,7 @@ services:
   # refuses FT.CREATE on any db but 0 ("Cannot create index on db != 0",
   # measured on this container), so isolation has to be a separate instance.
   # Profile-gated, so a normal `docker compose up -d` does not start it, and
-  # volume-less, so every run begins empty. CI gets the same thing from its
-  # service container.
+  # volume-less, so every run begins empty.
   #
   # redis-stack-SERVER, not redis-stack: same modules, no RedisInsight, which a
   # test instance has no use for.

@@ -996,7 +996,6 @@ supplements-chatbot/
 │   ├── eval_threshold.py        # cache threshold/band sweep -> markdown
 │   └── eval_guardrail.py        # guardrail threshold sweep -> markdown
 ├── tests/                       # pytest suite (see Testing, below)
-├── .github/workflows/ci.yml     # pytest over a Redis Stack service container
 ├── docs/screenshots/            # images used in this README
 ├── docker-compose.yml           # redis-stack (+ RedisInsight on :8001), redis-test
 ├── pytest.ini
@@ -1034,8 +1033,9 @@ pydantic-settings, so this needs no change to your `.env`.
 
 It also refuses to run against `:6379` at all, because the suite creates and
 deletes `kb:*`, `cache:*`, `guardrail:*`, `cache:stats:*` and `rl:*` keys and
-that is the instance you are probably mid-demo with. CI sets `ALLOW_DEV_REDIS=1`
-because its service container *is* the throwaway instance; nothing else should.
+that is the instance you are probably mid-demo with. `ALLOW_DEV_REDIS=1` is the
+escape hatch, and it is only correct against an instance you are willing to lose
+— a throwaway container, never the demo one.
 
 | Command | What it runs |
 |---|---|
@@ -1065,9 +1065,18 @@ What the suite pins down, in the order it matters:
   become immortal
 - that every path through the graph increments **exactly one** counter
 
-CI (`.github/workflows/ci.yml`) runs that suite against a
-`redis/redis-stack-server` service container, plus the frontend's `eslint` and
-`tsc --noEmit`.
+There is no CI pipeline — this is a local demo repo, so the same checks are run
+by hand before a commit:
+
+```bash
+docker compose --profile test up -d redis-test   # :6380, volume-less
+pytest -q
+cd frontend && npm run lint && npx tsc --noEmit
+```
+
+The frontend deliberately stops at `tsc --noEmit`: the dashboard's Server
+Component reads Redis at request time, so a `next build` would need a live
+connection and tells you nothing the typecheck does not.
 
 ## What this deliberately does not do
 

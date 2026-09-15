@@ -30,9 +30,9 @@ import pytest  # noqa: E402
 # --- safety rail, before any app import ---------------------------------------
 # This suite creates, overwrites and DELETES kb:*, cache:*, guardrail:*,
 # cache:stats:* and rl:* keys. Port 6379 is the demo instance in
-# docker-compose.yml, whose keyspace someone is probably mid-demo with. CI sets
-# ALLOW_DEV_REDIS because its service container *is* the throwaway instance;
-# nothing else should.
+# docker-compose.yml, whose keyspace someone is probably mid-demo with.
+# ALLOW_DEV_REDIS is the deliberate escape hatch, for an instance on :6379 you
+# are genuinely willing to lose — never the demo one.
 if ":6379" in TEST_REDIS_URL and not os.environ.get("ALLOW_DEV_REDIS"):
     pytest.exit(
         f"Refusing to run against {TEST_REDIS_URL}: this suite deletes kb:*, cache:*, "
